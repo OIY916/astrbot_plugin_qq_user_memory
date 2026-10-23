@@ -1,6 +1,6 @@
 name: astrbot_plugin_qq_user_memory
 desc: 跨群用户记忆 —— 以 QQ 号为主键记住每个人说过什么，换个群也认得出来
-version: 1.0.0
+version: 1.0.1
 author: OlY
 repo: https://github.com/OIY916/astrbot_plugin_qq_user_memory
 astrbot_version: ">=4.14.0"

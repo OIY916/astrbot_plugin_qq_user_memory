@@ -15,7 +15,7 @@
     "description": "生效群号（留空=所有群）",
     "type": "list",
     "default": [],
-    "hint": "填了以后只记录/检索这些群的发言，例如 [\"1000000001\", \"1000000002\"]"
+    "hint": "填了以后只记录/检索这些群的发言，例如 [\"693514204\", \"821537482\"]"
   },
   "inject_memory": {
     "description": "回复时注入记忆",
@@ -80,11 +80,17 @@
     "default": true,
     "hint": "每天把活跃用户的发言归纳成 2-3 句画像存进 facts 表（固定用 deepseek-chat）"
   },
+  "profile_time": {
+    "description": "每日画像执行时间（HH:MM）",
+    "type": "string",
+    "default": "00:00",
+    "hint": "24 小时制，精确到分钟，默认午夜 00:00。例：02:30 / 23:45。改完立即重排定时任务，无需重载"
+  },
   "profile_hour": {
-    "description": "每日画像执行时间（小时）",
+    "description": "（旧）每日画像执行小时",
     "type": "int",
-    "default": 3,
-    "hint": "0-23，默认凌晨 3:00。改了以后需要重载插件生效"
+    "default": 0,
+    "hint": "已由 profile_time 取代。仅在 profile_time 为空时作为回退使用"
   },
   "profile_min_messages": {
     "description": "画像只统计发言数达标的人",
@@ -103,17 +109,5 @@
     "type": "int",
     "default": 40,
     "hint": "跨所有群取最近 N 条，太少画像会偏"
-  },
-  "affinity_viewer_qq": {
-    "description": "好感度指令的可见范围",
-    "type": "string",
-    "default": "",
-    "hint": "留空 = 所有人可执行 /记忆 好感；填一个 QQ 号 = 只有这个人能查"
-  },
-  "forbidden_names": {
-    "description": "禁止机器人说出的名字",
-    "type": "list",
-    "default": [],
-    "hint": "填进去的名字不会出现在机器人的回复里（文字和语音都过滤）。适合填真实姓名等不想被当外号喊的内容"
   }
 }

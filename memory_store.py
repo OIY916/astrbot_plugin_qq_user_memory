@@ -125,11 +125,13 @@ CREATE TABLE IF NOT EXISTS facts (
 CREATE INDEX IF NOT EXISTS idx_facts_qq ON facts(qq);
 
 -- 好感度：机器人对群友的单向好感（0-100，初始 40）
+-- locked=1 表示主人手动设定过，每日自动评估不得覆盖
 CREATE TABLE IF NOT EXISTS affinity (
     qq          TEXT PRIMARY KEY,
     score       REAL NOT NULL DEFAULT 40,
     updated_at  REAL,
-    reason      TEXT
+    reason      TEXT,
+    locked      INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -166,7 +168,7 @@ CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
 END;
 """
 
-SCHEMA_VERSION = 3  # v3: 新增 affinity 好感度表
+SCHEMA_VERSION = 4  # v4: affinity 增加 locked 列（手动锁定不自动覆盖）
 
 # 好感度取值范围与初始值
 AFFINITY_MIN = 0.0
@@ -214,6 +216,21 @@ class MemoryStore:
         )
         self._conn.commit()
         self._writes_since_prune = 0
+        # v3 → v4：affinity 表补 locked 列
+        if old_version < 4:
+            try:
+                cols = [
+                    r[1]
+                    for r in self._conn.execute("PRAGMA table_info(affinity)").fetchall()
+                ]
+                if cols and "locked" not in cols:
+                    self._conn.execute(
+                        "ALTER TABLE affinity ADD COLUMN locked INTEGER NOT NULL DEFAULT 0"
+                    )
+                    self._conn.commit()
+                    logger.info("[user_memory] affinity 表已补 locked 列")
+            except Exception as e:
+                logger.error(f"[user_memory] affinity 迁移失败: {e}")
         # v1 → v2：清洗旧数据里的 @昵称(QQ号)
         if old_version < 2 and self._has_column_ratio_rows():
             try:
@@ -423,51 +440,80 @@ class MemoryStore:
     def get_affinity(self, qq: str) -> dict[str, Any]:
         """读取机器人对某人的好感度。没记录时返回默认 40（初始好感）。
 
-        返回值：{'score': float, 'updated_at': float|None, 'reason': str}
+        返回值：{'score': float, 'updated_at': float|None, 'reason': str, 'locked': bool}
+        locked=True 表示主人手动设定过，自动评估不得覆盖。
         """
         qq = str(qq or "").strip()
-        default = {"score": AFFINITY_DEFAULT, "updated_at": None, "reason": ""}
+        default = {
+            "score": AFFINITY_DEFAULT,
+            "updated_at": None,
+            "reason": "",
+            "locked": False,
+        }
         if not qq:
             return default
         with self._lock:
             row = self._conn.execute(
-                "SELECT score, updated_at, reason FROM affinity WHERE qq=?", (qq,)
+                "SELECT score, updated_at, reason, locked FROM affinity WHERE qq=?", (qq,)
             ).fetchone()
         if not row:
             return default
+        keys = row.keys()
         return {
             "score": float(row["score"]),
             "updated_at": row["updated_at"],
             "reason": str(row["reason"] or ""),
+            "locked": bool(row["locked"]) if "locked" in keys else False,
         }
 
     def set_affinity(
-        self, qq: str, score: float, reason: str = ""
+        self, qq: str, score: float, reason: str = "", locked: bool = False
     ) -> float:
-        """直接设置好感度（会裁剪到 0-100）。返回落库后的值。"""
+        """直接设置好感度（会裁剪到 0-100）。返回落库后的值。
+
+        locked=True 会永久锁定，之后 adjust_affinity 不再生效，直到手动解锁。
+        """
         qq = str(qq or "").strip()
         if not qq:
             return AFFINITY_DEFAULT
         val = max(AFFINITY_MIN, min(AFFINITY_MAX, float(score)))
         with self._lock:
             self._conn.execute(
-                "INSERT INTO affinity(qq, score, updated_at, reason) VALUES(?,?,?,?)"
+                "INSERT INTO affinity(qq, score, updated_at, reason, locked) VALUES(?,?,?,?,?)"
                 " ON CONFLICT(qq) DO UPDATE SET"
                 "   score=excluded.score,"
                 "   updated_at=excluded.updated_at,"
-                "   reason=excluded.reason",
-                (qq, val, time.time(), str(reason or "")[:200]),
+                "   reason=excluded.reason,"
+                "   locked=excluded.locked",
+                (qq, val, time.time(), str(reason or "")[:200], 1 if locked else 0),
             )
             self._commit()
         return val
 
+    def unlock_affinity(self, qq: str) -> bool:
+        """解除锁定（之后自动评估可以再次调整）。"""
+        qq = str(qq or "").strip()
+        if not qq:
+            return False
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE affinity SET locked=0 WHERE qq=?", (qq,)
+            )
+            self._commit()
+            return bool(cur.rowcount)
+
     def adjust_affinity(self, qq: str, delta: float, reason: str = "") -> float:
-        """在当前好感度上做增减（会裁剪到 0-100）。返回落库后的值。"""
+        """在当前好感度上做增减（会裁剪到 0-100）。返回落库后的值。
+
+        若该条被锁定（主人手动设定），直接返回当前值、不做调整。
+        """
         qq = str(qq or "").strip()
         if not qq:
             return AFFINITY_DEFAULT
-        cur = self.get_affinity(qq)["score"]
-        return self.set_affinity(qq, cur + float(delta), reason)
+        cur = self.get_affinity(qq)
+        if cur.get("locked"):
+            return cur["score"]
+        return self.set_affinity(qq, cur["score"] + float(delta), reason)
 
     def affinity_top(self, limit: int = 20) -> list[dict[str, Any]]:
         """好感度最高的前 N 人（含昵称）。"""

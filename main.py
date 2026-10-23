@@ -79,11 +79,15 @@ except ImportError:  # 直接当脚本跑时走同目录导入
 
 PLUGIN_NAME = "astrbot_plugin_qq_user_memory"
 
+# 好感度的可见性由配置项 affinity_viewer_qq 决定（留空=所有人可查），
+# 不要在代码里写死个人 QQ 号。
+AFFINITY_VIEWER_QQ = ""
+
+
 def strip_forbidden_names(text: str, names: list[str] | None = None) -> str:
     """把禁用称呼从文本里去掉（连同紧跟的「的/，/。」等）。
 
     names 由配置项 forbidden_names 提供，默认空 = 不过滤。
-
     例：names=["张三"] 时，「张三是个好人」→「是个好人」；
         「再说一次 张三」→「再说一次」
     """
@@ -145,11 +149,48 @@ def _extract_qq(text: str) -> str | None:
     return m.group(1) if m else None
 
 
+def _parse_hhmm(raw: Any) -> tuple[int | None, int]:
+    """把 "HH:MM" / "2:05" / "02：30"（中文冒号）解析成 (时, 分)。
+
+    解析失败返回 (None, 0)，由调用方决定回退策略。
+    也接受纯整数（如 2 表示 02:00）。
+    """
+    if raw is None:
+        return None, 0
+    s = str(raw).strip().replace("：", ":")
+    if not s:
+        return None, 0
+    # 纯数字（没有冒号）当作小时
+    if ":" not in s:
+        try:
+            h = int(s)
+        except ValueError:
+            return None, 0
+        if 0 <= h <= 23:
+            return h, 0
+        return None, 0
+    parts = s.split(":")
+    if len(parts) != 2:
+        return None, 0
+    try:
+        h = int(parts[0].strip())
+        m = int(parts[1].strip())
+    except ValueError:
+        return None, 0
+    if not (0 <= h <= 23) or not (0 <= m <= 59):
+        return None, 0
+    return h, m
+
+
+def _fmt_hhmm(h: int, m: int) -> str:
+    return f"{h:02d}:{m:02d}"
+
+
 @register(
     PLUGIN_NAME,
     "dafish",
     "跨群用户记忆 —— 记住每个 QQ 号是谁、说过什么，换个群也认得",
-    "1.0.0",
+    "1.0.1",
 )
 class QQUserMemoryPlugin(Star):
     def __init__(self, context: Context, config: Any = None):
@@ -177,10 +218,9 @@ class QQUserMemoryPlugin(Star):
             return default
 
     def _forbidden_names(self) -> list[str]:
-        """从配置读禁用称呼列表（配置项 forbidden_names，字符串或列表都接受）。"""
+        """从配置读禁用称呼列表（字符串用逗号/空格分隔也接受）。"""
         raw = self._cfg("forbidden_names", [])
         if isinstance(raw, str):
-            # 允许用逗号/空格分隔的字符串，方便在 WebUI 里填
             raw = re.split(r"[,，\s]+", raw)
         out: list[str] = []
         for item in raw or []:
@@ -266,6 +306,22 @@ class QQUserMemoryPlugin(Star):
             return ""
 
     # ------------------------------------------------------------ 每日画像
+    async def _restart_profile_task(self):
+        """取消现有定时任务并按当前配置重排（改时间后调用）。"""
+        task = self._profile_task
+        self._profile_task = None
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+        if profiler_mod is None or not self._cfg("enable_daily_profile", True):
+            return
+        self._profile_task = asyncio.create_task(self._daily_profile_loop())
+        _h, _m = self._profile_time()
+        logger.info(f"[user_memory] 画像定时任务已重排：每天 {_fmt_hhmm(_h, _m)}")
+
     async def initialize(self):
         """插件激活时起每日画像定时任务（纯 asyncio，不引入 apscheduler）。"""
         if profiler_mod is None:
@@ -277,18 +333,22 @@ class QQUserMemoryPlugin(Star):
         if self._profile_task is not None and not self._profile_task.done():
             return
         self._profile_task = asyncio.create_task(self._daily_profile_loop())
+        _h, _m = self._profile_time()
         logger.info(
             f"[user_memory] 每日画像定时任务已启动：每天 "
-            f"{int(self._cfg('profile_hour', 3)):02d}:00 执行（模型 deepseek-chat）"
+            f"{_fmt_hhmm(_h, _m)} 执行（模型 deepseek-chat）"
         )
 
     async def _daily_profile_loop(self):
-        """sleep 到下一个 profile_hour 整点 → 跑一次 → 循环。"""
+        """sleep 到下一个 profile_time 指定时刻 → 跑一次 → 循环。"""
         try:
             while True:
-                hour = self._profile_hour()
-                wait = self._seconds_until(hour)
-                logger.info(f"[user_memory] 下次画像将在 {wait / 3600:.1f} 小时后执行")
+                hh, mm = self._profile_time()
+                wait = self._seconds_until(hh, mm)
+                logger.info(
+                    f"[user_memory] 下次画像将在 {wait / 3600:.1f} 小时后执行"
+                    f"（每天 {hh:02d}:{mm:02d}）"
+                )
                 await asyncio.sleep(wait)
                 try:
                     await self.run_profile_now()
@@ -296,25 +356,37 @@ class QQUserMemoryPlugin(Star):
                     raise
                 except Exception as e:
                     logger.error(f"[user_memory] 每日画像执行异常: {e}", exc_info=True)
-                # 防止同一秒内再次触发（sleep 返回时刻恰好是整点时差 <1s）
+                # 防止同一秒内再次触发（sleep 返回时刻恰好是目标时刻，时差 <1s）
                 await asyncio.sleep(1)
         except asyncio.CancelledError:
             logger.info("[user_memory] 每日画像定时任务已取消")
             raise
 
-    def _profile_hour(self) -> int:
+    def _profile_time(self) -> tuple[int, int]:
+        """读配置得到画像执行时刻 (时, 分)。
+
+        优先用 profile_time（"HH:MM" 字符串，精确到分钟）；
+        兼容旧配置 profile_hour（整数小时）。解析失败回退 00:00。
+        """
+        raw = self._cfg("profile_time", None)
+        if raw not in (None, ""):
+            hh, mm = _parse_hhmm(raw)
+            if hh is not None:
+                return hh, mm
+            logger.warning(f"[user_memory] profile_time 格式无效: {raw!r}，回退 profile_hour")
+        # 兼容老配置
         try:
-            hour = int(self._cfg("profile_hour", 3))
+            hour = int(self._cfg("profile_hour", 0))
         except Exception:
-            hour = 3
-        return min(23, max(0, hour))
+            hour = 0
+        return min(23, max(0, hour)), 0
 
     @staticmethod
-    def _seconds_until(hour: int) -> float:
-        """距离下一个 hour:00 还有多少秒（今天还没到就等今天）。"""
+    def _seconds_until(hour: int, minute: int = 0) -> float:
+        """距离下一个 hour:minute 还有多少秒（今天还没到就等今天）。"""
         now = time.localtime()
         target = time.mktime(
-            (now.tm_year, now.tm_mon, now.tm_mday, int(hour), 0, 0, 0, 0, -1)
+            (now.tm_year, now.tm_mon, now.tm_mday, int(hour), int(minute), 0, 0, 0, -1)
         )
         if target <= time.time():
             target += 86400
@@ -560,11 +632,77 @@ class QQUserMemoryPlugin(Star):
             if viewer and self._sender_id(event) != viewer:
                 yield event.plain_result("这个指令不对你开放。")
                 return
+            # 支持设置：/记忆 好感 123456789 20   ← 锁定为 20，不被自动评估覆盖
+            parts = rest.split()
+            if len(parts) >= 2:
+                target = _extract_qq(parts[0]) or parts[0]
+                try:
+                    val = float(parts[1])
+                except ValueError:
+                    yield event.plain_result("用法：/记忆 好感 <QQ号> [0-100]")
+                    return
+                sc = self.store.set_affinity(target, val, "主人手动设定", locked=True)
+                yield event.plain_result(
+                    f"已把 QQ {target} 的好感度锁定为 {sc:.0f}（自动评估不再改动）"
+                )
+                return
             target = _extract_qq(rest) if rest else ""
             if target:
                 yield event.plain_result(self._affinity_detail_text(target))
             else:
                 yield event.plain_result(self._affinity_rank_text())
+            return
+
+        if sub in ("解锁好感", "unlock"):
+            viewer = str(self._cfg("affinity_viewer_qq", "") or "").strip()
+            # 留空 = 所有人可查；填了 QQ 号 = 只有该号可查
+            if viewer and self._sender_id(event) != viewer:
+                yield event.plain_result("这个指令不对你开放。")
+                return
+            target = _extract_qq(rest) if rest else ""
+            if not target:
+                yield event.plain_result("用法：/记忆 解锁好感 <QQ号>")
+                return
+            ok = self.store.unlock_affinity(target)
+            yield event.plain_result(
+                f"已解除 QQ {target} 的好感锁定" if ok else f"QQ {target} 没有锁定记录"
+            )
+            return
+
+        if sub in ("画像时间", "时间", "profile_time"):
+            if not self._is_admin(event):
+                yield event.plain_result("修改画像时间需要管理员权限。")
+                return
+            arg = (rest or "").strip()
+            cur_h, cur_m = self._profile_time()
+            if not arg:
+                yield event.plain_result(
+                    f"当前画像时间：每天 {_fmt_hhmm(cur_h, cur_m)}\n"
+                    f"要修改请发：/记忆 画像时间 HH:MM（例如 /记忆 画像时间 02:30）"
+                )
+                return
+            hh, mm = _parse_hhmm(arg)
+            if hh is None:
+                yield event.plain_result(
+                    f"时间格式不对：{arg!r}\n请用 24 小时制 HH:MM，例如 00:00 / 02:30 / 23:45"
+                )
+                return
+            # 写回运行时配置 + 持久化
+            try:
+                self.config["profile_time"] = _fmt_hhmm(hh, mm)
+                save_ok = True
+                try:
+                    self.config.save_config()  # AstrBotConfig 支持持久化
+                except Exception:
+                    save_ok = False
+                # 重排定时任务
+                await self._restart_profile_task()
+                tip = "" if save_ok else "\n⚠️ 配置未能写入磁盘，重启后会恢复旧值"
+                yield event.plain_result(
+                    f"✅ 画像时间已改为每天 {_fmt_hhmm(hh, mm)}，定时任务已重排{tip}"
+                )
+            except Exception as e:
+                yield event.plain_result(f"修改失败：{e}")
             return
 
         if sub in ("更新画像", "画像", "profile"):
