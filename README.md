@@ -167,6 +167,12 @@ python tests_profiler.py       # 画像生成（会真实调用 DeepSeek）
 
 ---
 
+## 作者
+
+**OlY** — [@OIY916](https://github.com/OIY916)
+
+---
+
 ## License
 
 MIT
