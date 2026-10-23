@@ -5,3 +5,9 @@ author: OlY
 repo: https://github.com/OIY916/astrbot_plugin_qq_user_memory
 astrbot_version: ">=4.14.0"
 support_platforms: aiocqhttp
+category: ai_tools
+tags:
+  - memory
+  - 长期记忆
+  - 群聊
+  - 跨群
