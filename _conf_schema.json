@@ -1,0 +1,119 @@
+{
+  "enable": {
+    "description": "启用跨群用户记忆",
+    "type": "bool",
+    "default": true,
+    "hint": "关闭后既不记录也不注入"
+  },
+  "record_private": {
+    "description": "记录私聊消息",
+    "type": "bool",
+    "default": true,
+    "hint": "关闭则只记录群聊发言"
+  },
+  "enabled_groups": {
+    "description": "生效群号（留空=所有群）",
+    "type": "list",
+    "default": [],
+    "hint": "填了以后只记录/检索这些群的发言，例如 [\"1000000001\", \"1000000002\"]"
+  },
+  "inject_memory": {
+    "description": "回复时注入记忆",
+    "type": "bool",
+    "default": true,
+    "hint": "在 LLM 请求里塞入「关于这位群友的记忆」"
+  },
+  "inject_on_all": {
+    "description": "每条消息都注入",
+    "type": "bool",
+    "default": false,
+    "hint": "默认只在 @机器人 时注入，避免读空气也吃 token"
+  },
+  "max_inject_chars": {
+    "description": "注入记忆的字数上限",
+    "type": "int",
+    "default": 300,
+    "hint": "画像约 75 字，留 2-3 条跨群发言的空间；200 会把发言全挤掉，400 以上没必要"
+  },
+  "recent_limit": {
+    "description": "注入几条最近发言（仅其他群）",
+    "type": "int",
+    "default": 3
+  },
+  "related_limit": {
+    "description": "注入几条话题相关旧发言（仅其他群）",
+    "type": "int",
+    "default": 2
+  },
+  "facts_limit": {
+    "description": "注入几条已知事实",
+    "type": "int",
+    "default": 6
+  },
+  "min_messages_before_inject": {
+    "description": "至少说过几条才注入",
+    "type": "int",
+    "default": 3,
+    "hint": "说话太少的人不值得占 token"
+  },
+  "max_messages_per_user": {
+    "description": "每人最多保留多少条发言",
+    "type": "int",
+    "default": 2000,
+    "hint": "超出后删除最旧的，防止库无限膨胀"
+  },
+  "retention_days": {
+    "description": "发言保留天数",
+    "type": "int",
+    "default": 180,
+    "hint": "0 表示永久保留"
+  },
+  "db_file": {
+    "description": "数据库文件名",
+    "type": "string",
+    "default": "user_memory.db",
+    "hint": "存在 data/plugin_data/astrbot_plugin_qq_user_memory/ 下"
+  },
+  "enable_daily_profile": {
+    "description": "启用每日画像",
+    "type": "bool",
+    "default": true,
+    "hint": "每天把活跃用户的发言归纳成 2-3 句画像存进 facts 表（固定用 deepseek-chat）"
+  },
+  "profile_hour": {
+    "description": "每日画像执行时间（小时）",
+    "type": "int",
+    "default": 3,
+    "hint": "0-23，默认凌晨 3:00。改了以后需要重载插件生效"
+  },
+  "profile_min_messages": {
+    "description": "画像只统计发言数达标的人",
+    "type": "int",
+    "default": 10,
+    "hint": "发言少于这个数的人不生成画像，避免样本太少瞎猜"
+  },
+  "profile_max_users": {
+    "description": "每日画像最多处理多少人",
+    "type": "int",
+    "default": 50,
+    "hint": "按发言数倒序取前 N 个活跃用户，控制每天的 API 花费"
+  },
+  "profile_recent_n": {
+    "description": "画像取样几条最近发言",
+    "type": "int",
+    "default": 40,
+    "hint": "跨所有群取最近 N 条，太少画像会偏"
+  },
+  "affinity_viewer_qq": {
+    "description": "好感度指令的可见范围",
+    "type": "string",
+    "default": "",
+    "hint": "留空 = 所有人可执行 /记忆 好感；填一个 QQ 号 = 只有这个人能查"
+  },
+  "forbidden_names": {
+    "description": "禁止机器人说出的名字",
+    "type": "list",
+    "default": [],
+    "hint": "填进去的名字不会出现在机器人的回复里（文字和语音都过滤）。适合填真实姓名等不想被当外号喊的内容"
+  }
+}

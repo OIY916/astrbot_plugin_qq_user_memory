@@ -1,0 +1,172 @@
+# astrbot_plugin_qq_user_memory
+
+> 跨群用户记忆 —— 以 **QQ 号**为主键，记住每个人说过什么，换个群也认得出来。
+
+AstrBot 插件。纯标准库实现，**零第三方依赖**，只用 SQLite。
+
+---
+
+## 它解决什么问题
+
+普通的群聊机器人换个群就"失忆"了：在 A 群认识你，在 B 群当陌生人。
+
+这个插件按 **QQ 号**聚合，同一个人在任意群的发言都归到同一份档案里。
+当你 @ 机器人时，它会把"这个人在**别的群**说过什么"注入模型上下文，
+于是它能跨群认出你。
+
+---
+
+## 特性
+
+| 能力 | 说明 |
+|---|---|
+| **跨群聚合** | 同一个 QQ 在多个群的发言合并成一个人的档案 |
+| **中文全文检索** | SQLite FTS5 + 中文逐字切分，搜"钓鱼"能命中"我去钓鱼了" |
+| **每日画像** | 用 LLM 把发言归纳成 2-3 句性格描述，让它"认识"这个人 |
+| **好感度系统** | 机器人对每个人的态度分数（0-100），影响配合度 |
+| **懒注入** | 只注入**其他群**的内容，当前群的历史上下文里已经有了，不重复浪费 token |
+| **输出过滤** | 可配置禁用称呼，文字和语音都不会说出来 |
+| **自动清理** | 每人最多保留 N 条、超期自动过期，库不会无限膨胀 |
+
+---
+
+## 安装
+
+1. 把整个文件夹放到 AstrBot 的插件目录：
+
+```
+data/plugins/astrbot_plugin_qq_user_memory/
+```
+
+2. 确认目录里至少有这几个文件：
+
+```
+main.py
+memory_store.py
+profiler.py
+_conf_schema.json
+metadata.yaml
+```
+
+3. 重启 AstrBot，日志里应出现：
+
+```
+[user_memory] 记忆库就绪: .../plugin_data/astrbot_plugin_qq_user_memory/user_memory.db (N 人 / M 条发言)
+```
+
+---
+
+## 配置
+
+在 AstrBot WebUI 的插件配置页调整，或直接改
+`data/config/astrbot_plugin_qq_user_memory_config.json`。
+
+**常用项：**
+
+| 配置 | 默认 | 说明 |
+|---|---|---|
+| `enable` | `true` | 总开关 |
+| `enabled_groups` | `[]` | 留空=所有群；填群号=只记录这些群 |
+| `inject_on_all` | `false` | `false`=只在 @ 机器人时注入；`true`=读空气也注入 |
+| `max_inject_chars` | `300` | 注入记忆的字数上限 |
+| `max_messages_per_user` | `2000` | 每人保留多少条发言 |
+| `retention_days` | `180` | 发言保留天数，`0`=永久 |
+| `enable_daily_profile` | `true` | 每日自动生成画像 |
+| `profile_hour` | `3` | 几点跑画像（凌晨） |
+| `affinity_viewer_qq` | `""` | 留空=所有人可查好感度；填 QQ=只有这个人能查 |
+| `forbidden_names` | `[]` | 机器人不会说出的名字（文字+语音都过滤） |
+
+---
+
+## 指令
+
+在群里或私聊发送：
+
+```
+/记忆 查 <QQ号或昵称>     看这个人的完整档案
+/记忆 搜 <关键词>         全文检索所有群的发言
+/记忆 记住 <QQ号> <内容>  手动记一条事实
+/记忆 统计                库里有数据的规模
+/记忆 好感                好感度排行（受 affinity_viewer_qq 限制）
+/记忆 好感 <QQ号>         单人好感度详情
+/记忆 更新画像            立刻重跑画像（管理员）
+/记忆 忘记 <QQ号>         删除某人全部记忆（管理员）
+```
+
+---
+
+## 画像与好感度需要 LLM
+
+每日画像固定使用 **DeepSeek**（`deepseek-chat`），key 从你的 AstrBot 配置读取：
+
+```
+data/cmd_config.json → provider_sources 里 id == "deepseek" 的 key
+```
+
+所以需要先在 AstrBot 里配好 DeepSeek 供应商。
+如果只想用基础记忆功能，可以关掉：
+
+```json
+{ "enable_daily_profile": false }
+```
+
+这样就不需要任何额外 API。
+
+---
+
+## 好感度是怎么来的
+
+**单向**（机器人对群友），`0-100`，初始 `40`。
+
+每天和画像一起，由 `deepseek-chat` 评估一次：根据这个人是否常夸它、骂它、
+聊天是否让人觉得舒服，给出 `-20 ~ +20` 的调整。
+
+分档影响态度：
+
+| 分数 | 表现 |
+|---|---|
+| 85+ | 有求必应，肉麻要求也配合 |
+| 65-85 | 愿意配合，先嘴硬两句 |
+| 45-65 | 看心情，会调侃 |
+| 25-45 | 敷衍、岔开话题 |
+| 0-25 | 直接不配合 |
+
+> 注意：好感度只注入给**人格提示词**，需要你在 AstrBot 的人格设定里写清楚
+> "好感度如何影响态度"，模型才会照做。插件只负责提供数字。
+
+---
+
+## 数据存在哪
+
+```
+data/plugin_data/astrbot_plugin_qq_user_memory/user_memory.db
+```
+
+SQLite 单文件，备份直接复制即可。
+
+---
+
+## 自测
+
+```bash
+cd data/plugins/astrbot_plugin_qq_user_memory
+python tests_selfcheck.py      # 存储层 + 检索 + 好感度
+python tests_integration.py    # 插件级集成（不需要真 AstrBot）
+python tests_profiler.py       # 画像生成（会真实调用 DeepSeek）
+```
+
+---
+
+## 已知限制
+
+- **没有语义检索**：用 FTS5 关键词，不是向量。搜"钓鱼"能中，但搜"垂钓"不一定。
+  （这是刻意的：DeepSeek 没有 embedding API，也不想增加成本）
+- **画像需要 API**：关掉 `enable_daily_profile` 后，只有原文检索，没有性格描述。
+- **中文切分是逐字**：好处是任意子串都能搜到，代价是索引比英文大一些。
+- **好感度依赖人格提示词**：插件只提供数字，态度是否能体现取决于你的人格写得够不够清楚。
+
+---
+
+## License
+
+MIT
