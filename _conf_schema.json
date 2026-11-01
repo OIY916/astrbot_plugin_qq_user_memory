@@ -53,8 +53,8 @@
   "min_messages_before_inject": {
     "description": "至少说过几条才注入",
     "type": "int",
-    "default": 3,
-    "hint": "说话太少的人不值得占 token"
+    "default": 20,
+    "hint": "说话太少的人不值得占 token；20 条以内生成的画像质量不靠谱"
   },
   "max_messages_per_user": {
     "description": "每人最多保留多少条发言",
@@ -91,6 +91,12 @@
     "type": "int",
     "default": 0,
     "hint": "已由 profile_time 取代。仅在 profile_time 为空时作为回退使用"
+  },
+  "affinity_viewer_qq": {
+    "description": "谁能查看好感度指令",
+    "type": "string",
+    "default": "",
+    "hint": "留空 = 所有人都能查；填 QQ 号 = 只有这个人能查"
   },
   "profile_min_messages": {
     "description": "画像只统计发言数达标的人",

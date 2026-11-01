@@ -77,28 +77,24 @@ except ImportError:  # 直接当脚本跑时走同目录导入
     except Exception:  # pragma: no cover - 画像模块缺失也不能让插件挂掉
         profiler_mod = None  # type: ignore
 
+try:  # WebUI 后端 API（pages/app/ 配它使用）
+    from .webui_api import WebApiMixin
+except ImportError:  # 单文件测试环境
+    try:
+        _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+    except Exception:
+        pass
+    try:
+        from webui_api import WebApiMixin  # type: ignore
+    except Exception:  # WebUI 模块缺失不能影响 QQ 功能
+        WebApiMixin = None  # type: ignore
+
 PLUGIN_NAME = "astrbot_plugin_qq_user_memory"
 
 # 好感度的可见性由配置项 affinity_viewer_qq 决定（留空=所有人可查），
 # 不要在代码里写死个人 QQ 号。
 AFFINITY_VIEWER_QQ = ""
 
-
-def strip_forbidden_names(text: str, names: list[str] | None = None) -> str:
-    """把禁用称呼从文本里去掉（连同紧跟的「的/，/。」等）。
-
-    names 由配置项 forbidden_names 提供，默认空 = 不过滤。
-    例：names=["张三"] 时，「张三是个好人」→「是个好人」；
-        「再说一次 张三」→「再说一次」
-    """
-    if not text or not names:
-        return text
-    out = text
-    for name in names:
-        if not name:
-            continue
-        out = re.sub(rf"{re.escape(name)}[的，,、。！!？?\s]*", "", out)
-    return out
 
 # 记录时跳过的内容：纯表情/纯图片占位符等
 _SKIP_PATTERNS = (
@@ -186,13 +182,16 @@ def _fmt_hhmm(h: int, m: int) -> str:
     return f"{h:02d}:{m:02d}"
 
 
+_MIXINS = (WebApiMixin,) if WebApiMixin is not None else ()
+
+
 @register(
     PLUGIN_NAME,
     "dafish",
     "跨群用户记忆 —— 记住每个 QQ 号是谁、说过什么，换个群也认得",
     "1.0.1",
 )
-class QQUserMemoryPlugin(Star):
+class QQUserMemoryPlugin(Star, *_MIXINS):
     def __init__(self, context: Context, config: Any = None):
         super().__init__(context)
         self.config = config or {}
@@ -209,6 +208,13 @@ class QQUserMemoryPlugin(Star):
             self._init_error = str(e)
             logger.error(f"[user_memory] 存储初始化失败: {e}", exc_info=True)
 
+        # WebUI 后端 API：失败只丢网页，不影响 QQ 侧的记忆功能
+        try:
+            if WebApiMixin is not None and hasattr(self, "_register_webui_apis"):
+                self._register_webui_apis()
+        except Exception as e:
+            logger.error(f"[user_memory] WebUI API 注册失败: {e}", exc_info=True)
+
     # ------------------------------------------------------------ 基础
     def _cfg(self, key: str, default: Any = None) -> Any:
         try:
@@ -216,18 +222,6 @@ class QQUserMemoryPlugin(Star):
             return default if v is None else v
         except Exception:
             return default
-
-    def _forbidden_names(self) -> list[str]:
-        """从配置读禁用称呼列表（字符串用逗号/空格分隔也接受）。"""
-        raw = self._cfg("forbidden_names", [])
-        if isinstance(raw, str):
-            raw = re.split(r"[,，\s]+", raw)
-        out: list[str] = []
-        for item in raw or []:
-            name = str(item or "").strip()
-            if name and name not in out:
-                out.append(name)
-        return out
 
     def _data_dir(self) -> str:
         if StarTools is not None:
@@ -852,49 +846,6 @@ class QQUserMemoryPlugin(Star):
         except Exception:
             pass
         return "\n".join(out)
-
-    # ------------------------------------------------------------ 输出过滤
-    @filter.on_decorating_result(priority=90)
-    async def filter_forbidden_names(self, event: AstrMessageEvent):
-        """把禁用称呼从回复里去掉（文字和语音都过这里）。
-
-        场景：群友拿某人的真实姓名当外号起哄，当事人在群里不想被这么喊。
-        仅靠人格提示不可靠——群友只要说「再说一句 XXX」，模型就会照着念。
-        所以这里在输出层做硬拦截，名字列表由配置项 forbidden_names 提供。
-
-        priority=90：要早于 rvc_tts_hook(priority=0) 执行，
-        否则语音会先按未清洗的文本合成，文字清了语音还是脏的。
-        """
-        names = self._forbidden_names()
-        if not names:
-            return
-        try:
-            result = event.get_result()
-        except Exception:
-            return
-        if not result or not getattr(result, "chain", None):
-            return
-
-        changed = False
-        for comp in result.chain:
-            text = getattr(comp, "text", None)
-            if isinstance(text, str) and text:
-                cleaned = strip_forbidden_names(text, names)
-                if cleaned != text:
-                    comp.text = cleaned.strip()
-                    changed = True
-        if changed:
-            # 清完变空的消息直接置空，避免发一条空消息
-            try:
-                remains = [
-                    c for c in result.chain
-                    if getattr(c, "text", None) or not isinstance(getattr(c, "text", None), str)
-                ]
-                if not remains:
-                    result.chain = []
-            except Exception:
-                pass
-            logger.info(f"[user_memory] 已过滤禁用称呼，回复已清洗")
 
     # ------------------------------------------------------------ 生命周期
     async def terminate(self):

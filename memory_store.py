@@ -766,7 +766,7 @@ class ContextBuilder:
         recent_limit: int = 5,
         related_limit: int = 3,
         facts_limit: int = 6,
-        min_messages: int = 3,
+        min_messages: int = 20,
     ) -> str:
         qq = str(qq or "").strip()
         if not qq:
@@ -796,44 +796,57 @@ class ContextBuilder:
         except Exception:
             other_total = 0
         if other_total < 2:
-            # 没有跨群内容也要给好感度，否则「服从度」对单群群友完全不生效
-            if not affinity_line:
+            # 没有跨群内容，但「好感度 + 画像」仍必须有。
+            # ⚠️ 2026-11-01 修复：原来这条路径只返回好感度一行，导致
+            # **只在一个群活跃的群友永远拿不到画像**（实测 4/10 用户中招），
+            # 而画像恰恰是最能体现「认识这个人」的东西。跨不跨群不该影响
+            # 要不要认识他——跨群只影响「要不要补别的群的发言」。
+            short_lines: list[str] = ["[关于这位群友]"]
+            if affinity_line:
+                short_lines.append(affinity_line)
+            facts = self.store.get_facts(qq, facts_limit)
+            profile_facts = [
+                f for f in facts if str(f.get("source") or "") == "profile"
+            ]
+            if profile_facts:
+                short_lines.append("【画像】")
+                for f in profile_facts:
+                    short_lines.append(f"- {f['content']}")
+            head = f"QQ号：{qq}"
+            use_nick = nickname or user.get("nickname") or ""
+            if use_nick:
+                head += f"，当前昵称「{use_nick}」"
+            short_lines.append(head)
+            if not affinity_line and not profile_facts:
                 return ""
-            block = f"[关于这位群友]\nQQ号：{qq}\n{affinity_line}"
-            return block[: max_chars or 200]
+            text = "\n".join(short_lines)
+            if max_chars and len(text) > max_chars:
+                out: list[str] = []
+                used = 0
+                for line in short_lines:
+                    if used + len(line) + 1 > max_chars:
+                        out.append("……（还有更多记忆，已省略）")
+                        break
+                    out.append(line)
+                    used += len(line) + 1
+                text = "\n".join(out)
+            return text
 
         names = self.store.group_names()
         lines: list[str] = [f"[关于这位群友的记忆]"]
 
-        head = f"QQ号：{qq}"
-        use_nick = nickname or user.get("nickname") or ""
-        if use_nick:
-            head += f"，当前昵称「{use_nick}」"
-        lines.append(head)
+        # ⚠️ 顺序决定截断后「谁先被保住」（2026-11-01 重排）。
+        # 实测：12 个活跃用户里 9 个被 300 字符截断，而「活跃群全列表」一项
+        # 就吃掉 140 字符（47%），导致【画像】经常是空的（连号主自己都中招）。
+        # 现在的顺序是「价值高的先放」：好感度 → 画像 → 事实 → 跨群发言 → 头部 → 群数。
+        # 头部（QQ号/昵称）信息量低但模型要靠它对上人，所以排在画像之后、
+        # 跨群发言之前；「活跃群」压成一句「还在 N 个其他群活跃」，不再列全名单。
 
-        # 昵称演变（跨群换马甲也能对上）
-        nicks = [n for (n, _c) in self.store.get_nicknames(qq, 6) if n]
-        if use_nick and nicks:
-            nicks = [n for n in nicks if n != use_nick]
-        if nicks:
-            lines.append("用过的昵称：" + "、".join(nicks[:6]))
-
-        # 在哪些群出现过（只看其他群：当前群的历史已经由群聊上下文喂给模型了）
-        groups = self.store.get_groups(qq)
-        if cur_gid:
-            groups = [g for g in groups if str(g.get("group_id") or "") != cur_gid]
-        if groups:
-            parts = []
-            for g in groups[:5]:
-                label = group_label(g["group_id"], names)
-                parts.append(f"{label}（{g['msg_count']}条）")
-            lines.append("活跃群：" + "；".join(parts))
-
-        # 好感度放在画像之前：它直接决定「配不配合」，比性格描述更优先
+        # 1) 好感度：直接决定「配不配合」，比性格描述更优先
         if affinity_line:
             lines.append(affinity_line)
 
-        # 事实：画像（每日生成的长期总结）排最前，手动记的其次
+        # 2) 事实：画像（每日生成的长期总结）排最前，手动记的其次
         facts = self.store.get_facts(qq, facts_limit)
         profile_facts = [f for f in facts if str(f.get("source") or "") == "profile"]
         manual_facts = [f for f in facts if str(f.get("source") or "") != "profile"]
@@ -845,6 +858,20 @@ class ContextBuilder:
             lines.append("已知事实：")
             for f in manual_facts:
                 lines.append(f"- {f['content']}")
+
+        # 3) 头部（QQ号 + 当前昵称）：让模型能把画像对上具体的人
+        head = f"QQ号：{qq}"
+        use_nick = nickname or user.get("nickname") or ""
+        if use_nick:
+            head += f"，当前昵称「{use_nick}」"
+        lines.append(head)
+
+        # 4) 昵称演变（跨群换马甲也能对上）——只留最近 3 个，原 6 个太占地方
+        nicks = [n for (n, _c) in self.store.get_nicknames(qq, 6) if n]
+        if use_nick and nicks:
+            nicks = [n for n in nicks if n != use_nick]
+        if nicks:
+            lines.append("用过的昵称：" + "、".join(nicks[:3]))
 
         # 最近发言：只取**其他群**的（当前群 + 500 条历史已在 prompt 里）
         cur = (current_text or "").strip()
@@ -885,6 +912,13 @@ class ContextBuilder:
             for m in related:
                 gl = group_label(m.get("group_id", ""), names)
                 lines.append(f"- {gl} {fmt_time(m['created_at'])}：{m['content'][:80]}")
+
+        # 5) 活跃群：压成一句话，不再列 5 个群名 + 条数（实测这一项曾吃掉 47% 预算）
+        groups = self.store.get_groups(qq)
+        if cur_gid:
+            groups = [g for g in groups if str(g.get("group_id") or "") != cur_gid]
+        if groups:
+            lines.append(f"还在 {len(groups)} 个其他群活跃")
 
         if len(lines) <= 2:
             return ""

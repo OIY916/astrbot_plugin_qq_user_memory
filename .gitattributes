@@ -1,0 +1,14 @@
+# 统一使用 LF 行尾，避免 Windows 下 CRLF 污染仓库
+* text=auto eol=lf
+*.py text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.js text eol=lf
+*.css text eol=lf
+*.html text eol=lf
+*.db binary
+*.png binary
+*.jpg binary
+*.gif binary

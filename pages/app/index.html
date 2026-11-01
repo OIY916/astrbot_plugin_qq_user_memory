@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>跨群用户记忆</title>
+    <link rel="stylesheet" href="style.css?v=1" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="topbar">
+        <div>
+          <h1>跨群用户记忆</h1>
+          <p class="sub">
+            以 QQ 号为主键，记住每个人说过什么、什么性格、好感多少。换个群也认得出来。
+          </p>
+        </div>
+        <button id="refreshBtn" class="btn ghost" type="button">刷新</button>
+      </header>
+
+      <div class="stats" id="stats"></div>
+
+      <div class="layout">
+        <aside class="sidebar">
+          <div class="sidebar-head">
+            <input id="userFilter" type="search" placeholder="筛选昵称 / QQ 号..." />
+            <select id="sortSelect" class="sort">
+              <option value="msg_count">按发言数</option>
+              <option value="last_seen">按最近活跃</option>
+              <option value="affinity">按好感度</option>
+            </select>
+          </div>
+          <div id="userList" class="user-list"></div>
+        </aside>
+
+        <section class="content">
+          <div id="emptyHint" class="empty">左边选一个人，看他的档案</div>
+
+          <div id="profilePane" class="pane hide">
+            <div class="content-head">
+              <div>
+                <h2 id="profileName">—</h2>
+                <p class="meta" id="profileMeta"></p>
+              </div>
+              <div class="actions">
+                <button id="viewAffinityBtn" class="btn ghost" type="button">好感排行</button>
+                <button id="backToUsersBtn" class="btn ghost" type="button">回到列表</button>
+              </div>
+            </div>
+
+            <div class="affbox" id="profileAffinity"></div>
+
+            <div class="section">
+              <h3>画像</h3>
+              <div id="profileFacts" class="facts"></div>
+            </div>
+
+            <div class="section">
+              <h3>手动记录</h3>
+              <div id="manualFacts" class="facts"></div>
+            </div>
+
+            <div class="section">
+              <h3>活跃群</h3>
+              <div id="profileGroups" class="chipwrap"></div>
+            </div>
+
+            <div class="section">
+              <h3>用过的昵称</h3>
+              <div id="profileNicks" class="chipwrap"></div>
+            </div>
+
+            <div class="section">
+              <h3>最近发言</h3>
+              <div id="profileRecent" class="entries"></div>
+            </div>
+          </div>
+
+          <div id="affinityPane" class="pane hide">
+            <div class="content-head">
+              <div>
+                <h2>好感度排行</h2>
+                <p class="meta">分数决定大肥鱼对他配不配合。带锁的是主人手动设定。</p>
+              </div>
+              <div class="actions">
+                <button id="backFromAffinityBtn" class="btn ghost" type="button">回到列表</button>
+              </div>
+            </div>
+            <div id="affinityList" class="afflist"></div>
+          </div>
+
+          <div id="searchPane" class="pane">
+            <div class="content-head">
+              <div>
+                <h2>全文检索</h2>
+                <p class="meta">在 3 万条发言里搜关键词（FTS5，支持中文逐字匹配）</p>
+              </div>
+            </div>
+            <div class="searchbar">
+              <input id="searchInput" type="search" placeholder="输入关键词，比如「唱歌」「显卡」..." />
+              <button id="searchBtn" class="btn" type="button">搜索</button>
+            </div>
+            <div id="searchStatus" class="status"></div>
+            <div id="searchResults" class="entries"></div>
+          </div>
+
+          <div id="groupsPane" class="pane hide">
+            <div class="content-head">
+              <div>
+                <h2>群组分布</h2>
+                <p class="meta">每个群有多少人、多少条发言</p>
+              </div>
+              <div class="actions">
+                <button id="backFromGroupsBtn" class="btn ghost" type="button">回到列表</button>
+              </div>
+            </div>
+            <div id="groupsList" class="grouplist"></div>
+          </div>
+        </section>
+      </div>
+
+      <footer class="foot">
+        <button id="tabUsers" class="tab active" type="button">用户</button>
+        <button id="tabAffinity" class="tab" type="button">好感排行</button>
+        <button id="tabGroups" class="tab" type="button">群组</button>
+        <button id="tabSearch" class="tab" type="button">全文检索</button>
+      </footer>
+    </div>
+
+    <!-- ⚠️ bridge SDK 必须在自己的 script 之前加载。
+         框架会把这里的 URL 改写成带 asset_token 的版本
+         （plugin_page_service.py:601-607 的 replace_bridge_url）。
+         如果不显式写这一行，框架会做兜底：把 bridge 追加到 </body> 之前，
+         也就是**本页面脚本之后**，导致 window.AstrBotPluginPage 还是 undefined。 -->
+    <script src="/api/plugin/page/bridge-sdk.js"></script>
+    <script src="script.js?v=2"></script>
+  </body>
+</html>
