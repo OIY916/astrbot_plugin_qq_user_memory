@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """画像模块自测（方向 B）：直连真实 deepseek-chat
 
-    cd E:/qq-bot/data/plugins/astrbot_plugin_qq_user_memory
-    PYTHONIOENCODING=utf-8 PYTHONUTF8=1 E:/qq-bot/astrbot-venv/Scripts/python.exe tests_profiler.py
+    cd <插件目录>
+    PYTHONIOENCODING=utf-8 PYTHONUTF8=1 python tests_profiler.py
 
 覆盖：
   1. 造 3 个用户各 15 条发言 → 直连真实 deepseek-chat 生成画像
@@ -114,8 +114,8 @@ USERS = {
     },
 }
 
-GROUP_A = ("1000000001", "一号群")
-GROUP_B = ("1000000002", "二号群")
+GROUP_A = ("693514204", "一号群")
+GROUP_B = ("821537482", "二号群")
 
 
 def seed(store, created_base=None):
@@ -150,7 +150,7 @@ class FakeObj:
 
 class FakeEvent:
     def __init__(self, sender, nickname, text, gid=None, gname="", at=False,
-                 self_id="1999999999", admin=False):
+                 self_id="3862642627", admin=False):
         self._sender = sender
         self._nickname = nickname
         self.message_str = text
@@ -409,15 +409,15 @@ async def main():
         # 手动指令：非管理员被拒
         out = await drain(plugin.memory_cmd(
             FakeEvent("123456789", "阿强", "/记忆 更新画像 123456789",
-                      "1000000001", "一号群", admin=False)))
+                      "693514204", "一号群", admin=False)))
         txt = out[0][1] if out else ""
         check("非管理员不能更新画像", "管理员" in txt, txt[:120])
 
         # 手动指令：管理员，指定 QQ
         if api_ok:
             out = await drain(plugin.memory_cmd(
-                FakeEvent("1000000001", "管理员", "/记忆 更新画像 123456789",
-                          "1000000001", "一号群", admin=True)))
+                FakeEvent("10000001", "管理员", "/记忆 更新画像 123456789",
+                          "693514204", "一号群", admin=True)))
             txt = "\n".join(x[1] for x in out)  # 先 yield 进度，再 yield 结果
             check("管理员单人生成成功", "画像已更新" in txt and "123456789" in txt, txt[:200])
             check("单人画像含中文",
@@ -428,8 +428,8 @@ async def main():
 
             # 手动指令：管理员，批量
             out = await drain(plugin.memory_cmd(
-                FakeEvent("1000000001", "管理员", "/记忆 更新画像",
-                          "1000000001", "一号群", admin=True)))
+                FakeEvent("10000001", "管理员", "/记忆 更新画像",
+                          "693514204", "一号群", admin=True)))
             txt = "\n".join(x[1] for x in out)
             check("管理员批量生成成功", "画像更新完成" in txt and "成功：3" in txt, txt[:240])
             print("  --- /记忆 更新画像 返回 ---")

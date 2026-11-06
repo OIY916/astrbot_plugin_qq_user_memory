@@ -46,6 +46,8 @@
     filter: "",
     sort: "msg_count",
     currentQq: "",
+    emotion: {},      // 当前人的情绪块（group / private）
+    scene: "group",   // 当前看哪个场景
   };
 
   const el = {};
@@ -57,6 +59,7 @@
     "searchStatus", "searchResults", "groupsPane", "groupsList",
     "tabUsers", "tabAffinity", "tabGroups", "tabSearch",
     "viewAffinityBtn", "backToUsersBtn", "backFromAffinityBtn", "backFromGroupsBtn",
+    "emotionSection", "emotionCard", "emotionChart", "emotionChartEmpty",
   ].forEach((id) => { el[id] = document.getElementById(id); });
 
   // ---------------------------------------------------------- 基础
@@ -172,6 +175,125 @@
     }
   }
 
+  // ---------------------------------------------------------- 情绪面板
+  function emotionBar(label, value, total, cls) {
+    const pct = Math.max(0, Math.min(100, (Number(value) / (total || 100)) * 100));
+    return `
+      <div class="emo-bar">
+        <span class="emo-bar-label">${esc(label)}</span>
+        <span class="emo-bar-track"><span class="emo-bar-fill ${cls}" style="width:${pct}%"></span></span>
+        <span class="emo-bar-num">${Math.round(Number(value))}</span>
+      </div>`;
+  }
+
+  function renderEmotion() {
+    const blk = (state.emotion || {})[state.scene];
+    if (!blk) {
+      el.emotionCard.innerHTML =
+        `<div class="empty small">${state.scene === "group" ? "群聊" : "私聊"}场景还没有情绪记录` +
+        `<br />（这个人在这边说过话之后才会开始记录）</div>`;
+      el.emotionChartEmpty.classList.remove("hide");
+      el.emotionChart.classList.add("hide");
+      return;
+    }
+    el.emotionCard.innerHTML = `
+      <div class="emo-top">
+        <span class="emo-label">${esc(blk.label || "—")}</span>
+        <span class="emo-tier">${esc(blk.tier || "")}</span>
+      </div>
+      ${emotionBar("好感度", blk.affection, 100, "emo-aff")}
+      ${emotionBar("亲近欲", blk.warmth, 100, "emo-warm")}
+      ${emotionBar("烦躁", blk.irritation, 100, "emo-irr")}
+      <div class="emo-foot">
+        互动 ${blk.turns || 0} 轮 · 更新于 ${esc(blk.last_update || "—")}
+      </div>`;
+    drawChart((blk.history || []).slice(-30));
+  }
+
+  function drawChart(rows) {
+    const cv = el.emotionChart;
+    if (!cv) return;
+    if (!rows || rows.length < 2) {
+      el.emotionChartEmpty.classList.remove("hide");
+      cv.classList.add("hide");
+      return;
+    }
+    el.emotionChartEmpty.classList.add("hide");
+    cv.classList.remove("hide");
+
+    const dpr = window.devicePixelRatio || 1;
+    const cssW = cv.clientWidth || 600;
+    const cssH = 150;
+    cv.width = cssW * dpr;
+    cv.height = cssH * dpr;
+    cv.style.width = cssW + "px";
+    cv.style.height = cssH + "px";
+    const c = cv.getContext("2d");
+    c.setTransform(dpr, 0, 0, dpr, 0, 0);
+    c.clearRect(0, 0, cssW, cssH);
+
+    const padL = 34, padR = 10, padT = 12, padB = 18;
+    const w = cssW - padL - padR;
+    const h = cssH - padT - padB;
+    const n = rows.length;
+
+    // 网格 + y 轴刻度
+    c.strokeStyle = "rgba(255,255,255,.10)";
+    c.fillStyle = "rgba(255,255,255,.42)";
+    c.font = "10px system-ui, sans-serif";
+    c.lineWidth = 1;
+    [0, 25, 50, 75, 100].forEach((v) => {
+      const y = padT + h - (v / 100) * h;
+      c.beginPath();
+      c.moveTo(padL, y);
+      c.lineTo(padL + w, y);
+      c.stroke();
+      c.fillText(String(v), 6, y + 3);
+    });
+
+    function line(key, color) {
+      c.beginPath();
+      c.strokeStyle = color;
+      c.lineWidth = 2;
+      c.lineJoin = "round";
+      rows.forEach((r, i) => {
+        const x = padL + (n === 1 ? w / 2 : (i / (n - 1)) * w);
+        const y = padT + h - (Math.max(0, Math.min(100, Number(r[key] || 0)) ) / 100) * h;
+        if (i === 0) c.moveTo(x, y);
+        else c.lineTo(x, y);
+      });
+      c.stroke();
+    }
+
+    line("affection", "rgba(120,190,255,.95)");   // 蓝：好感度
+    line("warmth", "rgba(255,170,120,.95)");      // 橙：亲近欲
+    line("irritation", "rgba(255,110,110,.95)");  // 红：烦躁
+
+    // 图例
+    c.font = "10px system-ui, sans-serif";
+    const legend = [
+      ["好感度", "rgba(120,190,255,.95)"],
+      ["亲近", "rgba(255,170,120,.95)"],
+      ["烦躁", "rgba(255,110,110,.95)"],
+    ];
+    let lx = padL + 4;
+    legend.forEach(([name, color]) => {
+      c.fillStyle = color;
+      c.fillRect(lx, cssH - 12, 8, 3);
+      c.fillStyle = "rgba(255,255,255,.62)";
+      c.fillText(name, lx + 10, cssH - 8);
+      lx += 52;
+    });
+  }
+
+  function switchScene(scene) {
+    state.scene = scene;
+    document.querySelectorAll(".scene-tab").forEach((b) => {
+      b.classList.toggle("active", b.dataset.scene === scene);
+    });
+    renderEmotion();
+  }
+
   // ---------------------------------------------------------- 单人档案
   function showPane(which) {
     ["profilePane", "affinityPane", "searchPane", "groupsPane"].forEach((k) => {
@@ -245,6 +367,18 @@
             )
             .join("")
         : `<div class="empty small">无记录</div>`;
+
+      // ---- 情绪面板 ----
+      state.emotion = d.emotion || {};
+      if (!state.emotion[state.scene]) {
+        // 当前场景没数据就自动切到有数据的那个
+        if (state.emotion.private) state.scene = "private";
+        else if (state.emotion.group) state.scene = "group";
+      }
+      document.querySelectorAll(".scene-tab").forEach((b) => {
+        b.classList.toggle("active", b.dataset.scene === state.scene);
+      });
+      renderEmotion();
 
       showPane("profilePane");
     } catch (e) {
@@ -410,6 +544,18 @@
   el.tabAffinity.addEventListener("click", loadAffinity);
   el.tabGroups.addEventListener("click", loadGroups);
   el.tabSearch.addEventListener("click", () => showPane("searchPane"));
+
+  // 情绪面板：群聊 / 私聊切换
+  document.querySelectorAll(".scene-tab").forEach((b) => {
+    b.addEventListener("click", () => switchScene(b.dataset.scene));
+  });
+
+  // 窗口大小变化时重画曲线
+  let _rsTimer = null;
+  window.addEventListener("resize", () => {
+    if (_rsTimer) clearTimeout(_rsTimer);
+    _rsTimer = setTimeout(renderEmotion, 200);
+  });
 
   // ---------------------------------------------------------- 启动
   await Promise.all([loadStats(), loadUsers()]);

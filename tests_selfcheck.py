@@ -121,7 +121,7 @@ def main():
     check("删除后 FTS 一致", store.search("fishing") == [], store.search("fishing"))
 
     print("[5] 注入上下文（只注入跨群信息）")
-    block = builder.build("111", "小明", "g3", "钓鱼好玩吗", max_chars=700)
+    block = builder.build("111", "小明", "g3", "钓鱼好玩吗", max_chars=700, min_messages=3)
     check("build 非空", bool(block), block)
     check("含 QQ 号", "111" in block, block)
     check("含昵称演变", "大明" in block or "小明" in block, block)
@@ -137,11 +137,12 @@ def main():
     _sig = _inspect.signature(ContextBuilder.build)
     check("默认 max_chars=200", _sig.parameters["max_chars"].default == 200,
           _sig.parameters["max_chars"].default)
-    check("默认 max_chars 生效", len(builder.build("111", "小明", "g3", "钓鱼")) <= 240,
-          len(builder.build("111", "小明", "g3", "钓鱼")))
+    check("默认 max_chars 生效",
+          len(builder.build("111", "小明", "g3", "钓鱼", min_messages=3)) <= 240,
+          len(builder.build("111", "小明", "g3", "钓鱼", min_messages=3)))
     check("查无此人返回空", builder.build("999", "x", "g1", "hi") == "",
           builder.build("999", "x", "g1", "hi"))
-    thin = builder.build("111", "小明", "g1", "", related_limit=0)
+    thin = builder.build("111", "小明", "g1", "", related_limit=0, min_messages=3)
     check("无当前话题也能构造", bool(thin), thin)
 
     print("[5b] 单群用户：不注入跨群内容，但**要**注入好感度")
@@ -149,7 +150,7 @@ def main():
     # （实测 27 人里 24 人是单群用户，不给好感度就等于 89% 的人行为无差异）
     for txt in ["单群第一句", "单群第二句", "单群第三句"]:
         store.record_message("555", "单群用户", "g1", "一号群", txt)
-    solo = builder.build("555", "单群用户", "g1", "随便聊聊")
+    solo = builder.build("555", "单群用户", "g1", "随便聊聊", min_messages=3)
     check("单群用户也拿到好感度", "好感" in solo, solo)
     check("单群用户不含跨群块标题", "[关于这位群友的记忆]" not in solo, solo)
     check("单群用户不泄漏具体发言", "单群第一句" not in solo, solo)
@@ -157,7 +158,7 @@ def main():
     store.record_message("666", "跨群", "gA", "A群", "我在A群说钓鱼装备")
     store.record_message("666", "跨群", "gA", "A群", "A群的人叫我老六")
     store.record_message("666", "跨群", "gB", "B群", "我在B群说钓鱼装备")
-    block2 = builder.build("666", "跨群", "gB", "钓鱼", max_chars=1000)
+    block2 = builder.build("666", "跨群", "gB", "钓鱼", max_chars=1000, min_messages=3)
     check("跨群用户有注入", bool(block2), block2)
     check("只含另一个群", "A群" in block2, block2)
     check("不含当前群内容", "B群" not in block2, block2)
@@ -166,7 +167,7 @@ def main():
     print("[5c] 画像（source=profile）与手动事实分开展示")
     store.add_fact("666", "长期爱好：钓鱼、爬山", source="profile")
     store.add_fact("666", "手动记的：喜欢喝冰美式", source="manual")
-    block3 = builder.build("666", "跨群", "gB", "", max_chars=2000)
+    block3 = builder.build("666", "跨群", "gB", "", max_chars=2000, min_messages=3)
     check("画像标题为【画像】", "【画像】" in block3, block3)
     check("画像内容出现", "长期爱好" in block3, block3)
     check("手动事实标题仍是「已知事实：」", "已知事实：" in block3, block3)

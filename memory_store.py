@@ -29,6 +29,18 @@ except Exception:  # 单独跑测试脚本时没有 astrbot
 
     logger = logging.getLogger("user_memory")
 
+# ---- jieba：主题提取用（可选依赖，没有就退回 n-gram 兜底）
+try:
+    import jieba as _jieba  # noqa: F401
+
+    try:
+        import jieba.posseg as _jieba_posseg  # type: ignore
+        _jieba.setLogLevel(60)
+    except Exception:  # pragma: no cover
+        _jieba_posseg = None
+except Exception:  # pragma: no cover
+    _jieba_posseg = None
+
 # ---------------------------------------------------------------- 中文切分
 
 def _is_cjk(ch: str) -> bool:
@@ -169,6 +181,113 @@ END;
 """
 
 SCHEMA_VERSION = 4  # v4: affinity 增加 locked 列（手动锁定不自动覆盖）
+
+
+# ====================================================================
+# 好感度桥接（2026-11-04）
+#
+# 好感度的唯一真相源改成了 group_chat_plus 的双驱情绪系统
+# （data/plugins/astrbot_plugin_group_chat_plus/data/mood_dual.db
+#   的 mood_state_v2 表，affection 字段）。
+#
+# 为什么要换：
+#   · qq_user_memory 的 affinity 是**单一数值**（只有 score）
+#   · 情绪系统是**双驱模型**（affection 关系 + warmth 亲近 + irritation 烦躁）
+#   · 两套并存会打架，所以统一到后者
+#
+# 本插件只保留「查看」能力（用户决定去掉锁定），
+# 所有读写都转发到情绪库，调用方代码一行不用改。
+# ====================================================================
+
+_MOOD_DB_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "astrbot_plugin_group_chat_plus", "data", "mood_dual.db",
+)
+
+
+def _mood_db() -> str:
+    """定位情绪库（延迟查找，避免加载顺序问题）。"""
+    cands = [
+        _MOOD_DB_PATH,
+        os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "data", "plugins", "astrbot_plugin_group_chat_plus",
+            "data", "mood_dual.db"),
+    ]
+    for p in cands:
+        if os.path.exists(p):
+            return p
+    return ""
+
+
+def _mood_conn():
+    """开一个情绪库连接（只读为主）。找不到返回 None。"""
+    p = _mood_db()
+    if not p:
+        return None
+    try:
+        con = sqlite3.connect(p, timeout=5)
+        con.row_factory = sqlite3.Row
+        return con
+    except Exception:
+        return None
+
+
+def _mood_get_affection(qq: str) -> float | None:
+    """从情绪库读 affection。没有记录返回 None。"""
+    con = _mood_conn()
+    if con is None:
+        return None
+    try:
+        row = con.execute(
+            "SELECT affection FROM mood_state_v2 "
+            "WHERE user_id=? AND scene='group'", (str(qq),)
+        ).fetchone()
+        if row is None:
+            return None
+        return float(row["affection"])
+    except Exception:
+        return None
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass
+
+
+def _mood_set_affection(qq: str, score: float, reason: str = "") -> float:
+    """写 affection 到情绪库。没有记录就创建。"""
+    con = _mood_conn()
+    val = max(AFFINITY_MIN, min(AFFINITY_MAX, float(score)))
+    if con is None:
+        return val
+    try:
+        row = con.execute(
+            "SELECT user_id FROM mood_state_v2 "
+            "WHERE user_id=? AND scene='group'", (str(qq),)
+        ).fetchone()
+        if row:
+            con.execute(
+                "UPDATE mood_state_v2 SET affection=? "
+                "WHERE user_id=? AND scene='group'", (val, str(qq)))
+        else:
+            warmth = max(0.0, min(100.0, 50.0 + (val - 50.0) * 0.4))
+            con.execute(
+                "INSERT INTO mood_state_v2 "
+                "(user_id, scene, affection, warmth, irritation, "
+                " base_warmth, base_irritation, turns, last_update) "
+                "VALUES (?, 'group', ?, ?, 0, ?, 0, 0, ?)",
+                (str(qq), val, warmth, warmth, time.time()))
+        con.commit()
+    except Exception as e:
+        logger.warning(f"[user_memory] 写情绪库失败（本地兜底）: {e}")
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass
+    return val
+
 
 # 好感度取值范围与初始值
 AFFINITY_MIN = 0.0
@@ -418,6 +537,130 @@ class MemoryStore:
             row = self._conn.execute("SELECT * FROM users WHERE qq=?", (str(qq),)).fetchone()
         return dict(row) if row else None
 
+    #: 主题提取用：出现在多少条消息里才算「他最近在聊这个」
+    TOPIC_MIN_COUNT = 2
+    #: 分词后只保留名词类词性（n 名词 / nz 专名 / nr 人名 / ns 地名 / nt 机构
+    #  / ng 名词性语素 / vn 名动词 / an 名形词 / eng 英文 / l 习用语）
+    _TOPIC_KEEP_FLAGS = ("n", "nz", "nr", "ns", "nt", "ng", "vn", "an", "eng", "l")
+    #: 虚字（兜底的 n-gram 路径用：首/尾是这些字的组合一律丢）
+    _TOPIC_STOP_CHARS = set(
+        "的了是我你他她它这那有在不也就都一个们吗呢吧啊哦嗯哈和与跟把被让给对说"
+        "要去来到会能要想看过还又很太更没别做上下前后里外多少大小好去后先再"
+    )
+    #: 虚词/泛词，分词后仍然要丢
+    _TOPIC_STOP_WORDS = {
+        "什么", "怎么", "为什么", "这个", "那个", "现在", "今天", "明天", "昨天",
+        "感觉", "知道", "觉得", "没有", "不是", "还是", "但是", "然后", "所以",
+        "因为", "如果", "真的", "有点", "一样", "自己", "东西", "时候", "问题",
+        "地方", "意思", "可能", "应该", "需要", "已经", "一直", "这些", "那些",
+        "其实", "反正", "群里", "上面", "下面", "里面", "外面", "之前", "之后",
+        "起来", "出来", "过来", "回来", "一点", "两个", "三个", "不会", "不用",
+        "别人", "咱们", "你们", "他们", "我们", "一个", "这么", "那么", "这样",
+        "那样", "时间", "事情", "情况", "样子", "本质", "意思", "概念",
+        # ---- 2026-11-05 补：实测捞出来的泛词，对「他在忙什么」零信息量 ----
+        "名字", "表情", "差不多", "你好", "自动", "小时", "分钟", "刚才",
+        "一下子", "哈哈哈", "笑死", "有点", "确实", "直接", "基本", "刚才",
+    }
+
+    @staticmethod
+    def _segment_topics(text: str) -> list[str]:
+        """把一句话切成名词语（jieba 不可用时退回 n-gram）。"""
+        text = (text or "").strip()
+        if not text:
+            return []
+        if _jieba_posseg is not None:
+            out = []
+            try:
+                for w, flag in _jieba_posseg.cut(text):
+                    w = w.strip()
+                    if len(w) < 2:
+                        continue
+                    if flag not in MemoryStore._TOPIC_KEEP_FLAGS:
+                        continue
+                    if w in MemoryStore._TOPIC_STOP_WORDS:
+                        continue
+                    if re.fullmatch(r"[0-9]+", w):
+                        continue
+                    out.append(w.lower())
+            except Exception:
+                return []
+            return out
+        # ---- 兜底：无 jieba 时用 2-3 字 n-gram ----
+        # ⚠️ 实测过：不做虚词过滤时捞出来全是「这个/直接/就是/不是」，
+        # 质量等于没有。所以这里复用同一套停用词，并且丢掉首/尾是虚字的组合。
+        cleaned = re.sub(r"[^一-鿿A-Za-z0-9]", " ", text)
+        out = []
+        for seg in cleaned.split():
+            if re.fullmatch(r"[A-Za-z][A-Za-z0-9_.\-]{1,}", seg):
+                out.append(seg.lower())
+                continue
+            for n in (2, 3):
+                for i in range(len(seg) - n + 1):
+                    w = seg[i : i + n]
+                    if w[0] in MemoryStore._TOPIC_STOP_CHARS:
+                        continue
+                    if w[-1] in MemoryStore._TOPIC_STOP_CHARS:
+                        continue
+                    if w in MemoryStore._TOPIC_STOP_WORDS:
+                        continue
+                    out.append(w)
+        return out
+
+    def recent_topics(
+        self, qq: str, days: int = 7, scan: int = 250, top_k: int = 4
+    ) -> list[str]:
+        """这个人最近几天在聊什么（本地分词统计，不花 LLM 钱）。
+
+        这是「会想」的关键原料：画像回答「他是什么人」（长期静态），
+        这一行回答「他这两天在忙什么」（动态）。没有它，模型只能演「我认识你」；
+        有了它，模型才能接「你那个 X 弄得怎么样了」。
+        """
+        qq = str(qq or "").strip()
+        if not qq:
+            return []
+        since = time.time() - max(1, int(days)) * 86400
+        with self._lock:
+            try:
+                rows = self._conn.execute(
+                    "SELECT content FROM messages WHERE qq=? AND created_at>=?"
+                    " ORDER BY created_at DESC LIMIT ?",
+                    (qq, since, max(20, int(scan))),
+                ).fetchall()
+            except Exception:
+                return []
+
+        counter: dict[str, int] = {}
+        for r in rows:
+            try:
+                content = str(r["content"] or "")
+            except Exception:
+                content = str(r[0] or "")
+            # 按「消息条数」计而不是词频：刷屏的人不能靠重复一个词占领主题
+            for w in set(self._segment_topics(content)):
+                counter[w] = counter.get(w, 0) + 1
+
+        # 样本太少时主题不可信（38 条发言能捞出的只有「傻子」「kk」这种噪声，
+        # 反而让模型以为他整天在骂人）。低于这个条数就不给「最近常聊」。
+        if len(rows) < 40:
+            return []
+
+        cand = [(w, c) for w, c in counter.items() if c >= self.TOPIC_MIN_COUNT]
+        cand.sort(key=lambda x: (-x[1], -len(x[0])))
+        out: list[str] = []
+        for w, _c in cand:
+            # 主题词里也要挡脏话/骂人词（「傻子」「废物」当主题毫无意义）
+            if _PROFANITY_ANY.search(w):
+                continue
+            # 已有更长的词包含它就不再单列（有「记忆插件」就不要「记忆」）
+            if any(w != o and w in o for o in out):
+                continue
+            if any(o in w for o in out):
+                continue
+            out.append(w)
+            if len(out) >= top_k:
+                break
+        return out
+
     def get_groups(self, qq: str) -> list[dict[str, Any]]:
         with self._lock:
             rows = self._conn.execute(
@@ -438,10 +681,14 @@ class MemoryStore:
 
     # ---------------------------------------------------------- 好感度
     def get_affinity(self, qq: str) -> dict[str, Any]:
-        """读取机器人对某人的好感度。没记录时返回默认 40（初始好感）。
+        """读取好感度 —— **数据源是 group_chat_plus 的情绪库**。
+
+        2026-11-04：好感度模块已换成双驱情绪系统
+        （mood_state_v2 表的 affection 字段）。
+        返回值结构保持不变，调用方不用改。
 
         返回值：{'score': float, 'updated_at': float|None, 'reason': str, 'locked': bool}
-        locked=True 表示主人手动设定过，自动评估不得覆盖。
+        locked 恒为 False（用户决定去掉锁定功能）。
         """
         qq = str(qq or "").strip()
         default = {
@@ -452,6 +699,31 @@ class MemoryStore:
         }
         if not qq:
             return default
+
+        # ---- 优先读情绪库 ----
+        aff = _mood_get_affection(qq)
+        if aff is not None:
+            # reason 仍从本地表拿（情绪库里没有这个字段）
+            reason = ""
+            updated = None
+            try:
+                with self._lock:
+                    row = self._conn.execute(
+                        "SELECT reason, updated_at FROM affinity WHERE qq=?",
+                        (qq,)).fetchone()
+                if row:
+                    reason = str(row["reason"] or "")
+                    updated = row["updated_at"]
+            except Exception:
+                pass
+            return {
+                "score": float(aff),
+                "updated_at": updated,
+                "reason": reason,
+                "locked": False,
+            }
+
+        # ---- 情绪库里没有 → 退回本地表（迁移前的老数据/从未互动的人）----
         with self._lock:
             row = self._conn.execute(
                 "SELECT score, updated_at, reason, locked FROM affinity WHERE qq=?", (qq,)
@@ -463,60 +735,106 @@ class MemoryStore:
             "score": float(row["score"]),
             "updated_at": row["updated_at"],
             "reason": str(row["reason"] or ""),
-            "locked": bool(row["locked"]) if "locked" in keys else False,
+            "locked": False,   # 锁定功能已废弃
         }
 
     def set_affinity(
         self, qq: str, score: float, reason: str = "", locked: bool = False
     ) -> float:
-        """直接设置好感度（会裁剪到 0-100）。返回落库后的值。
+        """设置好感度 —— **写入 group_chat_plus 的情绪库**。
 
-        locked=True 会永久锁定，之后 adjust_affinity 不再生效，直到手动解锁。
+        2026-11-04：数据源换成双驱情绪系统。
+        locked 参数保留但**已废弃**（用户决定去掉锁定功能）。
+
+        reason 仍存本地表（情绪库没有这个字段），便于回溯是谁改的。
         """
         qq = str(qq or "").strip()
         if not qq:
             return AFFINITY_DEFAULT
+
         val = max(AFFINITY_MIN, min(AFFINITY_MAX, float(score)))
-        with self._lock:
-            self._conn.execute(
-                "INSERT INTO affinity(qq, score, updated_at, reason, locked) VALUES(?,?,?,?,?)"
-                " ON CONFLICT(qq) DO UPDATE SET"
-                "   score=excluded.score,"
-                "   updated_at=excluded.updated_at,"
-                "   reason=excluded.reason,"
-                "   locked=excluded.locked",
-                (qq, val, time.time(), str(reason or "")[:200], 1 if locked else 0),
-            )
-            self._commit()
-        return val
+
+        # ---- 写情绪库（唯一真相源）----
+        written = _mood_set_affection(qq, val, reason)
+
+        # ---- reason 记在本地表（不参与读取判断）----
+        try:
+            with self._lock:
+                self._conn.execute(
+                    "INSERT INTO affinity(qq, score, updated_at, reason, locked)"
+                    " VALUES(?,?,?,?,0)"
+                    " ON CONFLICT(qq) DO UPDATE SET"
+                    "   score=excluded.score,"
+                    "   updated_at=excluded.updated_at,"
+                    "   reason=excluded.reason",
+                    (qq, val, time.time(), str(reason or "")[:200]),
+                )
+                self._commit()
+        except Exception:
+            pass
+
+        return written
 
     def unlock_affinity(self, qq: str) -> bool:
-        """解除锁定（之后自动评估可以再次调整）。"""
-        qq = str(qq or "").strip()
-        if not qq:
-            return False
-        with self._lock:
-            cur = self._conn.execute(
-                "UPDATE affinity SET locked=0 WHERE qq=?", (qq,)
-            )
-            self._commit()
-            return bool(cur.rowcount)
+        """解除锁定 —— **功能已废弃**（2026-11-04 好感度模块换成情绪系统）。
+
+        保留方法是为了让老命令不报 AttributeError，但永远返回 False。
+        """
+        return False
 
     def adjust_affinity(self, qq: str, delta: float, reason: str = "") -> float:
         """在当前好感度上做增减（会裁剪到 0-100）。返回落库后的值。
 
-        若该条被锁定（主人手动设定），直接返回当前值、不做调整。
+        2026-11-04：读写都走情绪库。锁定功能已废弃，不再检查 locked。
         """
         qq = str(qq or "").strip()
         if not qq:
             return AFFINITY_DEFAULT
         cur = self.get_affinity(qq)
-        if cur.get("locked"):
-            return cur["score"]
         return self.set_affinity(qq, cur["score"] + float(delta), reason)
 
     def affinity_top(self, limit: int = 20) -> list[dict[str, Any]]:
-        """好感度最高的前 N 人（含昵称）。"""
+        """好感度最高的前 N 人（含昵称）—— **数据源是情绪库**。"""
+        # ---- 优先从情绪库算 ----
+        con = _mood_conn()
+        if con is not None:
+            try:
+                rows = con.execute(
+                    "SELECT user_id, affection FROM mood_state_v2 "
+                    "WHERE scene='group' ORDER BY affection DESC LIMIT ?",
+                    (int(limit),)).fetchall()
+                ids = [r["user_id"] for r in rows]
+                nicks = {}
+                if ids:
+                    try:
+                        with self._lock:
+                            ph = ",".join("?" * len(ids))
+                            for r in self._conn.execute(
+                                f"SELECT qq, nickname FROM users WHERE qq IN ({ph})",
+                                ids,
+                            ):
+                                nicks[str(r["qq"])] = r["nickname"]
+                    except Exception:
+                        pass
+                return [
+                    {
+                        "qq": str(r["user_id"]),
+                        "score": float(r["affection"]),
+                        "updated_at": None,
+                        "reason": "",
+                        "nickname": nicks.get(str(r["user_id"]), ""),
+                    }
+                    for r in rows
+                ]
+            except Exception:
+                pass
+            finally:
+                try:
+                    con.close()
+                except Exception:
+                    pass
+
+        # ---- 兜底：本地表 ----
         with self._lock:
             rows = self._conn.execute(
                 "SELECT a.qq, a.score, a.updated_at, a.reason, u.nickname"
@@ -739,6 +1057,112 @@ def fmt_time(ts: float | None) -> str:
         return "?"
 
 
+# ---------------------------------------------------------------- 发言筛选
+#
+# 【2026-11-05 加】为什么需要这个：
+# 注入块里原来原样铺「在其他群里说过：- 用 / - 对的 / - 啥」，
+# 这类碎片对模型零信息量，却实打实吃掉 300 字的预算，
+# 把真正有价值的「dsh默认上下文是1M」挤出去。
+# 模型看不到有内容的记忆，自然只表现出「记得这个人」，不会「想起具体的事」。
+
+#: 低于这个长度基本是「用 / 对的 / 啥 / 哈」这类废话
+_MIN_SUBSTANTIVE_LEN = 6
+
+#: 整条就是语气词/应答词，一律丢掉
+_FILLER_RE = re.compile(
+    r"^(?:"
+    r"用|对的|是的|对|是|嗯|啊|哦|噢|哈|哈哈|哈哈哈|\+1|1|6|666|"
+    r"好|好吧|好的|行|可以|没事|没有|不是|真的|确实|好的呢|"
+    r"啥|什么|怎么|为什么|草|我靠|啊这|离谱|笑死|绷|乐|"
+    r"ok|okay|yes|no|嗯嗯|啊啊|哦哦|好好好"
+    r")[。！？~…\.\!\?]*$",
+    re.IGNORECASE,
+)
+
+#: 纯表情/纯标点
+_JUNK_ONLY_RE = re.compile(r"^[\s\W_]+$", re.UNICODE)
+
+#: 纯骂人/纯情绪宣泄。这类句子有长度、有"内容"，但对「认识一个人」零价值，
+#: 而且在注入块里出现会带偏模型的语气（实测：注入「我有傻逼恐惧症」之后
+#: 回复明显变冲）。只拦「整句都是脏话」的，骂人里带具体信息的照留。
+_PROFANITY = (
+    "傻逼|傻比|傻b|傻福|sb|妈的|他妈的|tmd|nmsl|cnm|草泥马|尼玛|你妈|去死|"
+    "滚你|贱人|废物|狗东西|智障|脑残|弱智|神经病|有病吧|闭嘴|"
+    "fuck|shit|bitch|damn"
+)
+_PROFANITY_RE = re.compile(r"^(?:" + _PROFANITY + r")", re.IGNORECASE)
+_PROFANITY_ANY = re.compile(_PROFANITY, re.IGNORECASE)
+
+
+def is_substantive(content: str) -> bool:
+    """这条发言值不值得占注入预算。"""
+    t = (content or "").strip()
+    if not t:
+        return False
+    if _JUNK_ONLY_RE.match(t):
+        return False
+    if _FILLER_RE.match(t):
+        return False
+    # 纯 @ 提及（@某人 / @某人 空格）没有任何内容
+    if re.fullmatch(r"(?:@\S+\s*)+", t):
+        return False
+    # 中文按字算，英文/数字按 2 字算（"1M" 有点信息量但不大）
+    if len(t) < _MIN_SUBSTANTIVE_LEN:
+        return False
+    # 脏话清洗后剩不下东西 → 整句就是情绪宣泄
+    if _PROFANITY_ANY.search(t):
+        stripped = _PROFANITY_ANY.sub("", t)
+        stripped = re.sub(r"[\s\W_]+", "", stripped)
+        if len(stripped) < 6:
+            return False
+    return True
+
+
+def rank_messages(
+    messages: list[dict[str, Any]],
+    topics: list[str] | None = None,
+    limit: int = 3,
+) -> list[dict[str, Any]]:
+    """从候选发言里挑「最值得记住的」几条，而不是「最近的」几条。
+
+    为什么不能只取最近：
+    「在其他群里说过」原来越是取最近 3 条，越容易全是「@xxx」「哈哈」
+    「这儿有个傻福骂人」这种，模型读了等于没读。
+    这里按「有信息量」打分：长度适中、含专名/英文/数字、命中他的近期主题 加分；
+    然后按时间正序返回（模型看到的是「他这些天在聊这些」）。
+
+    打分权重是实测调出来的，别随手改。
+    """
+    topics = [t.lower() for t in (topics or []) if t]
+    scored: list[tuple[float, dict[str, Any]]] = []
+    for idx, m in enumerate(messages):
+        content = str(m.get("content") or "").strip()
+        if not content:
+            continue
+        score = 0.0
+        n = len(content)
+        # 1) 长度：6-60 字最像「一句完整的话」；超过 80 字多半是转贴
+        if 6 <= n <= 60:
+            score += 1.0
+        elif 60 < n <= 120:
+            score += 0.5
+        # 2) 含英文/数字/URL = 具体信息（dsh、1M、b23、github 链接…）
+        if re.search(r"[A-Za-z]{2,}|https?://|\d", content):
+            score += 0.8
+        # 3) 命中近期主题 = 真正反映他在关心什么
+        low = content.lower()
+        hit = sum(1 for t in topics if t and t in low)
+        score += min(hit, 3) * 1.2
+        # 4) 越新越好（但只占小权重，别让它盖过信息量）
+        score += max(0.0, 0.6 - idx * 0.05)
+        scored.append((score, m))
+
+    scored.sort(key=lambda x: -x[0])
+    picked = [m for _s, m in scored[: max(1, int(limit))]]
+    picked.sort(key=lambda m: float(m.get("created_at") or 0))
+    return picked
+
+
 def group_label(group_id: str, names: dict[str, str] | None = None) -> str:
     gid = str(group_id or "")
     if not gid:
@@ -802,8 +1226,21 @@ class ContextBuilder:
             # 而画像恰恰是最能体现「认识这个人」的东西。跨不跨群不该影响
             # 要不要认识他——跨群只影响「要不要补别的群的发言」。
             short_lines: list[str] = ["[关于这位群友]"]
+            short_lines.append(
+                "（这些是你自己记得的事，不是别人塞给你的资料。"
+                "他问你最近在干嘛、你还记不记得、猜他在折腾什么——"
+                "就照你记得的答，别装不知道、别反问回去、别要他提醒。"
+                "其余时候聊到了顺口提一句，别整段复述、别说“根据记忆”。）"
+            )
             if affinity_line:
                 short_lines.append(affinity_line)
+            # 单群用户同样需要「他最近在聊什么」——否则只能演出「我认识你」
+            try:
+                _topics = self.store.recent_topics(qq, days=7, top_k=4)
+            except Exception:
+                _topics = []
+            if _topics:
+                short_lines.append("最近常聊：" + "、".join(_topics))
             facts = self.store.get_facts(qq, facts_limit)
             profile_facts = [
                 f for f in facts if str(f.get("source") or "") == "profile"
@@ -834,6 +1271,14 @@ class ContextBuilder:
 
         names = self.store.group_names()
         lines: list[str] = [f"[关于这位群友的记忆]"]
+        # 【2026-11-05 加】使用方式必须写在**开头**，否则一被截断就没了，
+        # 模型就退回「照着档案念」。这句是「会想」和「会背」的分界线。
+        lines.append(
+            "（这些是你自己记得的事，不是别人塞给你的资料。"
+            "他问你最近在干嘛、你还记不记得、猜他在折腾什么——"
+            "就照你记得的答，别装不知道、别反问回去、别要他提醒。"
+            "其余时候聊到了顺口提一句，别整段复述、别说“根据记忆”。）"
+        )
 
         # ⚠️ 顺序决定截断后「谁先被保住」（2026-11-01 重排）。
         # 实测：12 个活跃用户里 9 个被 300 字符截断，而「活跃群全列表」一项
@@ -845,6 +1290,16 @@ class ContextBuilder:
         # 1) 好感度：直接决定「配不配合」，比性格描述更优先
         if affinity_line:
             lines.append(affinity_line)
+
+        # 1.5) 【近期关注】——「会想」的核心。
+        # 画像只回答「他是什么人」（长期、静态），这一行回答「他这几天在忙什么」（动态）。
+        # 没有这一行，模型只能演「我认识你」，有了才能接「你那个 X 弄得怎么样了」。
+        try:
+            topics = self.store.recent_topics(qq, days=7, top_k=4)
+        except Exception:
+            topics = []
+        if topics:
+            lines.append("最近常聊：" + "、".join(topics))
 
         # 2) 事实：画像（每日生成的长期总结）排最前，手动记的其次
         facts = self.store.get_facts(qq, facts_limit)
@@ -874,16 +1329,25 @@ class ContextBuilder:
             lines.append("用过的昵称：" + "、".join(nicks[:3]))
 
         # 最近发言：只取**其他群**的（当前群 + 500 条历史已在 prompt 里）
+        # ⚠️ 2026-11-05：多取 4 倍再筛掉废话，保证「值得看的那条」不会被
+        # 「用 / 对的 / 啥」挤掉（原来直接取 3 条，经常全是碎片）。
         cur = (current_text or "").strip()
         recent: list[dict[str, Any]] = []
         if recent_limit:
             try:
-                recent = [
-                    m for m in self.store.recent_messages_other_groups(
-                        qq, cur_gid, recent_limit + 2
-                    )
-                    if m.get("content", "").strip() and m.get("content", "").strip() != cur
-                ][:recent_limit]
+                pool = self.store.recent_messages_other_groups(
+                    qq, cur_gid, max(recent_limit * 5, 20)
+                )
+                recent = rank_messages(
+                    [
+                        m for m in pool
+                        if m.get("content", "").strip()
+                        and m.get("content", "").strip() != cur
+                        and is_substantive(m.get("content", ""))
+                    ],
+                    topics,
+                    limit=recent_limit,
+                )
             except Exception:
                 recent = []
         if recent:
@@ -897,14 +1361,16 @@ class ContextBuilder:
         if current_text and related_limit:
             try:
                 related = self.store.search_other_groups(
-                    current_text, cur_gid, limit=related_limit + 2, qq=qq
+                    current_text, cur_gid, limit=(related_limit + 2) * 3, qq=qq
                 )
             except Exception:
                 related = []
             recent_ids = {r["id"] for r in recent}
             related = [
                 m for m in related
-                if m["content"].strip() != cur and m["id"] not in recent_ids
+                if m["content"].strip() != cur
+                and m["id"] not in recent_ids
+                and is_substantive(m["content"])
             ][:related_limit]
         if related:
             kw = (current_text or "").strip()[:20]
@@ -930,6 +1396,11 @@ class ContextBuilder:
             used = 0
             for line in lines:
                 if used + len(line) + 1 > max_chars:
+                    # ⚠️ 2026-11-05：不能把「以冒号结尾的小标题」留在末尾当孤儿。
+                    # 原来会产出「和当前话题相关的旧发言（关键词：xxx）：」+ 省略号，
+                    # 模型看到「有个标题但没内容」会以为记忆残缺，反而更不敢用。
+                    while out and out[-1].rstrip().endswith(("：", ":")):
+                        used -= len(out.pop()) + 1
                     out.append("……（还有更多记忆，已省略）")
                     break
                 out.append(line)

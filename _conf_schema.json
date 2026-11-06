@@ -15,7 +15,7 @@
     "description": "生效群号（留空=所有群）",
     "type": "list",
     "default": [],
-    "hint": "填了以后只记录/检索这些群的发言，例如 [\"1000000001\", \"1000000002\"]"
+    "hint": "填了以后只记录/检索这些群的发言，例如 [\"693514204\", \"821537482\"]"
   },
   "inject_memory": {
     "description": "回复时注入记忆",
@@ -26,19 +26,19 @@
   "inject_on_all": {
     "description": "每条消息都注入",
     "type": "bool",
-    "default": false,
-    "hint": "默认只在 @机器人 时注入，避免读空气也吃 token"
+    "default": true,
+    "hint": "建议开启：不开就只有被@时才有记忆，读空气回复会「六亲不认」"
   },
   "max_inject_chars": {
     "description": "注入记忆的字数上限",
     "type": "int",
-    "default": 300,
-    "hint": "画像约 75 字，留 2-3 条跨群发言的空间；200 会把发言全挤掉，400 以上没必要"
+    "default": 500,
+    "hint": "画像约 90 字 + 最近关注一行 + 3-4 条跨群发言；300 会截掉发言，500 刚好"
   },
   "recent_limit": {
     "description": "注入几条最近发言（仅其他群）",
     "type": "int",
-    "default": 3
+    "default": 4
   },
   "related_limit": {
     "description": "注入几条话题相关旧发言（仅其他群）",
@@ -53,8 +53,8 @@
   "min_messages_before_inject": {
     "description": "至少说过几条才注入",
     "type": "int",
-    "default": 20,
-    "hint": "说话太少的人不值得占 token；20 条以内生成的画像质量不靠谱"
+    "default": 8,
+    "hint": "说话太少不值得占 token；20 太高（实测 65% 的群友拿不到任何记忆）"
   },
   "max_messages_per_user": {
     "description": "每人最多保留多少条发言",
@@ -67,6 +67,36 @@
     "type": "int",
     "default": 180,
     "hint": "0 表示永久保留"
+  },
+  "enable_emotion": {
+    "description": "启用情绪系统（好感度 + 情绪值）",
+    "type": "bool",
+    "default": true,
+    "hint": "关闭后不记录情绪、不注入情绪提示、/好感 不可用。记忆功能不受影响"
+  },
+  "emotion_db_file": {
+    "description": "情绪库文件名",
+    "type": "string",
+    "default": "mood_dual.db",
+    "hint": "存在 data/plugin_data/astrbot_plugin_qq_user_memory/ 下"
+  },
+  "enable_mood_llm_analysis": {
+    "description": "情绪用 LLM 细判",
+    "type": "bool",
+    "default": true,
+    "hint": "关键词先判，拿不准才调 LLM。关掉纯关键词，省钱但没那么准"
+  },
+  "mood_llm_max_per_hour": {
+    "description": "情绪 LLM 每小时最多调几次",
+    "type": "int",
+    "default": 60,
+    "hint": "限流，防止情绪分析把额度吃光。超出的走关键词兜底"
+  },
+  "affinity_viewer_qq": {
+    "description": "/好感 指令的可见范围",
+    "type": "string",
+    "default": "",
+    "hint": "留空=所有人可查；填 QQ 号=只有这个人能查。只影响指令，面板不受限"
   },
   "db_file": {
     "description": "数据库文件名",
@@ -91,12 +121,6 @@
     "type": "int",
     "default": 0,
     "hint": "已由 profile_time 取代。仅在 profile_time 为空时作为回退使用"
-  },
-  "affinity_viewer_qq": {
-    "description": "谁能查看好感度指令",
-    "type": "string",
-    "default": "",
-    "hint": "留空 = 所有人都能查；填 QQ 号 = 只有这个人能查"
   },
   "profile_min_messages": {
     "description": "画像只统计发言数达标的人",

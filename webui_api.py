@@ -142,6 +142,10 @@ class WebApiMixin:
             ("users", self._api_users, ["GET"], "用户列表（可按昵称/QQ 筛选）"),
             ("profile", self._api_profile, ["GET"], "单个用户的完整档案"),
             ("affinity", self._api_affinity, ["GET"], "好感度排行榜"),
+            ("emotion", self._api_emotion, ["GET"], "某人某场景的情绪状态"),
+            ("emotion_history", self._api_emotion_history, ["GET"], "情绪变化曲线"),
+            ("emotion_all", self._api_emotion_all, ["GET"], "全部情绪状态"),
+            ("emotion_adjust", self._api_emotion_adjust, ["POST"], "手动调整情绪/好感"),
             ("search", self._api_search, ["POST"], "全文检索发言"),
             ("groups", self._api_groups, ["GET"], "群组列表"),
         ]
@@ -276,6 +280,39 @@ class WebApiMixin:
             except Exception:
                 aff = {}
 
+            # ---- 情绪系统（好感度 + 情绪值）----
+            # 2026-11-04 合并后：好感度的真相源是 mood_state_v2，
+            # 所以这里的 affinity 优先用情绪库，旧的 affinity 表只作兜底。
+            emotion_block = {}
+            em = getattr(self, "emotion", None)
+            if em is not None and getattr(em, "ready", False):
+                for scene in ("group", "private"):
+                    st = em.get_state(qq, scene)
+                    if st is None:
+                        continue
+                    emotion_block[scene] = {
+                        "scene": scene,
+                        "affection": round(st.affection, 1),
+                        "warmth": round(st.warmth, 1),
+                        "irritation": round(st.irritation, 1),
+                        "base_warmth": round(st.base_warmth, 1),
+                        "base_irritation": round(st.base_irritation, 1),
+                        "label": st.label(),
+                        "instruction": st.instruction(),
+                        "turns": int(st.turns),
+                        "tier": em.tier_of(st.affection),
+                        "last_update": _ts(st.last_update),
+                        "history": em.history(qq, scene, limit=30),
+                    }
+                g = emotion_block.get("group")
+                if g:
+                    aff = {
+                        "score": g["affection"],
+                        "reason": "",
+                        "locked": 0,
+                        "updated_at": g["last_update"],
+                    }
+
             facts_raw = store.get_facts(qq, 30) or []
             profile_facts = [
                 {"content": f.get("content"), "source": f.get("source")}
@@ -336,6 +373,7 @@ class WebApiMixin:
                         "locked": int(aff.get("locked") or 0),
                         "updated_at": _ts(aff.get("updated_at")),
                     },
+                    "emotion": emotion_block,
                     "groups": groups,
                     "nicknames": nicks,
                     "profile_facts": profile_facts,
@@ -348,12 +386,35 @@ class WebApiMixin:
             return self._json_err(str(e))
 
     async def _api_affinity(self):
-        """好感度排行榜（现有 affinity_top 从没在群里暴露过）。"""
-        store, err = self._need_store()
-        if err:
-            return err
+        """好感度排行榜。
+
+        2026-11-04：数据源改成本插件的情绪库（mood_state_v2.affection）。
+        旧的 affinity 表已不再维护，仅为兼容保留读取兜底。
+        """
         try:
             limit = _int_param("limit", 30, 1, 200)
+            scene = _param("scene", "group") or "group"
+            emotion = getattr(self, "emotion", None)
+            if emotion is not None and getattr(emotion, "ready", False):
+                rows = emotion.affinity_rows(limit, scene)
+                store = getattr(self, "store", None)
+                for r in rows:
+                    nick = ""
+                    if store is not None:
+                        try:
+                            u = store.get_user(r["qq"]) or {}
+                            nick = str(u.get("nickname") or "")
+                        except Exception:
+                            nick = ""
+                    r["nickname"] = nick
+                    r["tier"] = emotion.tier_of(r["score"])
+                return self._json_ok(
+                    {"items": rows, "total": len(rows), "scene": scene}
+                )
+            # 兜底：旧 affinity 表
+            store, err = self._need_store()
+            if err:
+                return err
             rows = store.affinity_top(limit) or []
             items = []
             for r in rows:
@@ -362,7 +423,7 @@ class WebApiMixin:
                 items.append(
                     {
                         "qq": qq,
-                        "nickname": str(u.get("nickname") or r.get("nickname") or ""),
+                        "nickname": str(u.get("nickname") or ""),
                         "score": round(float(r.get("score") or 0), 1),
                         "reason": str(r.get("reason") or ""),
                         "locked": int(r.get("locked") or 0),
@@ -373,6 +434,133 @@ class WebApiMixin:
             return self._json_ok({"items": items, "total": len(items)})
         except Exception as e:
             logger.error(f"[user_memory] affinity 失败: {e}", exc_info=True)
+            return self._json_err(str(e))
+
+    # ---------------------------------------------------------- 情绪接口
+    def _emotion_hub(self):
+        """取情绪门面；不可用返回 (None, 错误响应)。"""
+        em = getattr(self, "emotion", None)
+        if em is None or not getattr(em, "ready", False):
+            return None, self._json_err("情绪系统未启用")
+        return em, None
+
+    @staticmethod
+    def _scene_value(raw: str) -> str:
+        return raw if raw in ("group", "private") else "group"
+
+    async def _api_emotion(self):
+        """某人某场景的情绪状态。query: qq, scene"""
+        em, err = self._emotion_hub()
+        if err:
+            return err
+        try:
+            qq = _param("qq").strip()
+            if not qq:
+                return self._json_err("缺少 qq 参数")
+            scene = self._scene_value(_param("scene", "group"))
+            st = em.get_state(qq, scene)
+            if st is None:
+                return self._json_err(f"查不到 QQ {qq} 的情绪记录")
+            return self._json_ok(
+                {
+                    "qq": qq,
+                    "scene": scene,
+                    "affection": round(st.affection, 1),
+                    "warmth": round(st.warmth, 1),
+                    "irritation": round(st.irritation, 1),
+                    "label": st.label(),
+                    "instruction": st.instruction(),
+                    "turns": int(st.turns),
+                    "tier": em.tier_of(st.affection),
+                    "last_update": _ts(st.last_update),
+                }
+            )
+        except Exception as e:
+            logger.error(f"[user_memory] emotion 失败: {e}", exc_info=True)
+            return self._json_err(str(e))
+
+    async def _api_emotion_history(self):
+        """情绪变化曲线。query: qq, scene, limit"""
+        em, err = self._emotion_hub()
+        if err:
+            return err
+        try:
+            qq = _param("qq").strip()
+            if not qq:
+                return self._json_err("缺少 qq 参数")
+            scene = self._scene_value(_param("scene", "group"))
+            limit = _int_param("limit", 50, 1, 500)
+            rows = em.history(qq, scene, limit=limit)
+            for r in rows:
+                r["at"] = _ts(r.get("ts"))
+            return self._json_ok(
+                {"items": rows, "total": len(rows), "qq": qq, "scene": scene}
+            )
+        except Exception as e:
+            logger.error(f"[user_memory] emotion_history 失败: {e}", exc_info=True)
+            return self._json_err(str(e))
+
+    async def _api_emotion_all(self):
+        """全部情绪状态（不死板只读群聊）。query: scene"""
+        em, err = self._emotion_hub()
+        if err:
+            return err
+        try:
+            scene_raw = _param("scene", "")
+            scene = scene_raw if scene_raw in ("group", "private") else None
+            limit = _int_param("limit", 200, 1, 1000)
+            rows = em.affinity_rows(limit, scene)
+            store = getattr(self, "store", None)
+            for r in rows:
+                nick = ""
+                if store is not None:
+                    try:
+                        u = store.get_user(r["qq"]) or {}
+                        nick = str(u.get("nickname") or "")
+                    except Exception:
+                        nick = ""
+                r["nickname"] = nick
+                r["tier"] = em.tier_of(r["score"])
+            return self._json_ok({"items": rows, "total": len(rows)})
+        except Exception as e:
+            logger.error(f"[user_memory] emotion_all 失败: {e}", exc_info=True)
+            return self._json_err(str(e))
+
+    async def _api_emotion_adjust(self):
+        """手动调整。body: {qq, scene?, affection?, warmth?, irritation?}"""
+        em, err = self._emotion_hub()
+        if err:
+            return err
+        try:
+            body = await _json_body()
+            qq = str(body.get("qq") or "").strip()
+            if not qq:
+                return self._json_err("缺少 qq 参数")
+            scene = self._scene_value(str(body.get("scene") or "group"))
+            st = em.get_state(qq, scene)
+            if st is None:
+                return self._json_err("读取状态失败")
+            if "affection" in body and body["affection"] is not None:
+                em.set_affection(qq, float(body["affection"]), scene)
+                st = em.get_state(qq, scene)
+            for key in ("warmth", "irritation"):
+                if key in body and body[key] is not None:
+                    setattr(st, key, max(0.0, min(100.0, float(body[key])))
+                            )
+            em.store.save(st)
+            em.store.record_history(st, reason="webui_adjust")
+            return self._json_ok(
+                {
+                    "qq": qq,
+                    "scene": scene,
+                    "affection": round(st.affection, 1),
+                    "warmth": round(st.warmth, 1),
+                    "irritation": round(st.irritation, 1),
+                    "label": st.label(),
+                }
+            )
+        except Exception as e:
+            logger.error(f"[user_memory] emotion_adjust 失败: {e}", exc_info=True)
             return self._json_err(str(e))
 
     async def _api_search(self):

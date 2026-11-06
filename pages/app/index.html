@@ -50,6 +50,23 @@
 
             <div class="affbox" id="profileAffinity"></div>
 
+            <!-- 情绪系统：好感度 + 情绪值（2026-11-04 从 group_chat_plus 合并进来） -->
+            <div class="section emotion-section" id="emotionSection">
+              <div class="emotion-head">
+                <h3>情绪状态</h3>
+                <div class="scene-tabs">
+                  <button class="scene-tab active" data-scene="group" type="button">群聊</button>
+                  <button class="scene-tab" data-scene="private" type="button">私聊</button>
+                </div>
+              </div>
+              <div id="emotionCard" class="emotion-card"></div>
+              <div class="emotion-chart-wrap">
+                <div class="chart-title">情绪变化曲线</div>
+                <canvas id="emotionChart" height="150"></canvas>
+                <div id="emotionChartEmpty" class="empty small">还没有足够的历史记录</div>
+              </div>
+            </div>
+
             <div class="section">
               <h3>画像</h3>
               <div id="profileFacts" class="facts"></div>

@@ -52,7 +52,7 @@ class FakeEvent:
     """只实现插件用到的那几个方法。"""
 
     def __init__(self, sender, nickname, text, gid=None, gname="", at=False,
-                 self_id="1999999999", admin=False):
+                 self_id="3862642627", admin=False):
         self._sender = sender
         self._nickname = nickname
         self.message_str = text
@@ -132,14 +132,14 @@ async def main():
 
     print("[1] 记录：同一人跨 3 个群")
     msgs = [
-        ("123456789", "小明", "1000000001", "一号群", "今天天气很好我想去钓鱼"),
-        ("123456789", "小明", "1000000002", "二号群", "我养了一只猫叫小白"),
-        ("123456789", "大明", "1000000003", "三号群", "周末去爬山了"),
-        ("987654321", "小红", "1000000001", "一号群", "钓鱼真的很难"),
-        ("555666777", "路人", "1000000001", "一号群", "大家好"),
+        ("123456789", "小明", "693514204", "一号群", "今天天气很好我想去钓鱼"),
+        ("123456789", "小明", "821537482", "二号群", "我养了一只猫叫小白"),
+        ("123456789", "大明", "100000001", "三号群", "周末去爬山了"),
+        ("987654321", "小红", "693514204", "一号群", "钓鱼真的很难"),
+        ("555666777", "路人", "693514204", "一号群", "大家好"),
     ]
     for qq, nick, gid, gname, text in msgs:
-        await plugin.record_message(FakeEvent(qq, nick, text, gid, gname, self_id="1999999999"))
+        await plugin.record_message(FakeEvent(qq, nick, text, gid, gname, self_id="3862642627"))
 
     u = plugin.store.get_user("123456789")
     check("3 条发言全部记下", u and u["msg_count"] == 3, u)
@@ -148,13 +148,13 @@ async def main():
     print("[2] 过滤：不该记的内容")
     before = plugin.store.stats()["messages"]
     for text in ["[图片]", "[表情:12]", "[At:123456]", "/唱 晴天", "   "]:
-        await plugin.record_message(FakeEvent("123456789", "小明", text, "1000000001", "一号群"))
+        await plugin.record_message(FakeEvent("123456789", "小明", text, "693514204", "一号群"))
     check("占位符/指令不入库", plugin.store.stats()["messages"] == before,
           plugin.store.stats()["messages"])
 
     print("[2b] @提及清洗（AstrBot 的 @昵称(QQ号) 格式）")
     await plugin.record_message(FakeEvent(
-        "444555666", "阿强", "@小红(987654321) 晚上吃啥", "1000000001", "一号群"))
+        "444555666", "阿强", "@小红(987654321) 晚上吃啥", "693514204", "一号群"))
     last = plugin.store.recent_messages("444555666", 1)[0]["content"]
     check("@昵称(QQ号) 还原成 @昵称", last == "@小红 晚上吃啥", repr(last))
     hits = plugin.store.search("987654321", limit=5)
@@ -162,17 +162,17 @@ async def main():
 
     print("[3] 不记录机器人自己")
     await plugin.record_message(
-        FakeEvent("1999999999", "大肥鱼", "我是机器人说的话", "1000000001", "一号群", self_id="1999999999"))
-    check("机器人自己不入库", plugin.store.get_user("1999999999") is None)
+        FakeEvent("3862642627", "大肥鱼", "我是机器人说的话", "693514204", "一号群", self_id="3862642627"))
+    check("机器人自己不入库", plugin.store.get_user("3862642627") is None)
 
     print("[4] 注入：@bot 时带跨群记忆")
     req = FakeReq()
-    ev = FakeEvent("123456789", "小明", "你还记得我喜欢钓鱼吗", "1000000003", "三号群", at=True)
+    ev = FakeEvent("123456789", "小明", "你还记得我喜欢钓鱼吗", "100000001", "三号群", at=True)
     await plugin.inject_memory(ev, req)
     check("prompt 增加", len(req.prompt) > len("用户的原始提问"), len(req.prompt))
     check("prompt 含记忆块", "[关于这位群友的记忆]" in req.prompt, req.prompt[:200])
     check("prompt 含 QQ 号", "123456789" in req.prompt, req.prompt[:300])
-    check("prompt 含跨群信息", "1000000001" in req.prompt or "一号群" in req.prompt, req.prompt[:400])
+    check("prompt 含跨群信息", "693514204" in req.prompt or "一号群" in req.prompt, req.prompt[:400])
     check("prompt 含昵称演变", "大明" in req.prompt, req.prompt[:400])
     check("标题是「在其他群里说过」", "在其他群里说过：" in req.prompt, req.prompt[:600])
     check("旧标题「最近说过」不再出现", "最近说过：" not in req.prompt, req.prompt[:600])
@@ -180,29 +180,29 @@ async def main():
     check("system_prompt 未被动", req.system_prompt == "系统提示词", req.system_prompt)
 
     print("[4b] 注入：单群用户不注入")
-    # 路人 只在一个群里说过话；即使话够多，在当前群也没跨群价值
+    # 路人 只在 693514204 说过话；即使话够多，在当前群也没跨群价值
     for i in range(4):
         await plugin.record_message(FakeEvent(
-            "555666777", "路人", f"单群发言第{i}句", "1000000001", "一号群"))
+            "555666777", "路人", f"单群发言第{i}句", "693514204", "一号群"))
     req_solo = FakeReq()
     await plugin.inject_memory(FakeEvent(
-        "555666777", "路人", "你还记得我吗", "1000000001", "一号群", at=True), req_solo)
+        "555666777", "路人", "你还记得我吗", "693514204", "一号群", at=True), req_solo)
     check("单群用户不注入", "[关于这位群友的记忆]" not in req_solo.prompt, req_solo.prompt)
     # 换个群就有跨群内容了（一号群 → 二号群）
     req_cross = FakeReq()
     await plugin.inject_memory(FakeEvent(
-        "555666777", "路人", "你还记得我吗", "1000000002", "二号群", at=True), req_cross)
+        "555666777", "路人", "你还记得我吗", "821537482", "二号群", at=True), req_cross)
     check("换群后有注入", "[关于这位群友的记忆]" in req_cross.prompt, req_cross.prompt[:400])
-    check("换群后只含一号群内容", "一号群" in req_cross.prompt or "1000000001" in req_cross.prompt,
+    check("换群后只含一号群内容", "一号群" in req_cross.prompt or "693514204" in req_cross.prompt,
           req_cross.prompt[:400])
-    check("换群后不含当前群（二号群）", "1000000002" not in req_cross.prompt, req_cross.prompt[:600])
+    check("换群后不含当前群（二号群）", "821537482" not in req_cross.prompt, req_cross.prompt[:600])
 
     print("[4c] 注入：profile 事实标【画像】，手动事实标「已知事实：」")
     plugin.store.add_fact("123456789", "长期画像：喜欢钓鱼和猫", source="profile")
     plugin.store.add_fact("123456789", "手动记的：爱喝冰美式", source="manual")
     req_prof = FakeReq()
     await plugin.inject_memory(FakeEvent(
-        "123456789", "小明", "钓鱼吗", "1000000003", "三号群", at=True), req_prof)
+        "123456789", "小明", "钓鱼吗", "100000001", "三号群", at=True), req_prof)
     check("含【画像】", "【画像】" in req_prof.prompt, req_prof.prompt[:600])
     check("含已知事实", "已知事实：" in req_prof.prompt, req_prof.prompt[:600])
     check("画像在已知事实之前",
@@ -217,81 +217,81 @@ async def main():
     print("[5] 注入：非 @ 不注入")
     req2 = FakeReq()
     await plugin.inject_memory(
-        FakeEvent("123456789", "小明", "自言自语", "1000000003", "三号群", at=False), req2)
+        FakeEvent("123456789", "小明", "自言自语", "100000001", "三号群", at=False), req2)
     check("非 @ 不注入", req2.prompt == "用户的原始提问", req2.prompt)
 
     print("[6] 注入：陌生人 / 话太少")
     req3 = FakeReq()
     await plugin.inject_memory(
-        FakeEvent("777888999", "陌生", "第一次说话", "1000000001", "一号群", at=True), req3)
+        FakeEvent("777888999", "陌生", "第一次说话", "693514204", "一号群", at=True), req3)
     check("陌生人无记忆块", "[关于这位群友的记忆]" not in req3.prompt, req3.prompt)
     req4 = FakeReq()
     await plugin.inject_memory(
-        FakeEvent("555666777", "路人", "我又来了", "1000000001", "一号群", at=True), req4)
+        FakeEvent("555666777", "路人", "我又来了", "693514204", "一号群", at=True), req4)
     check("话太少不注入（<3 条）", "[关于这位群友的记忆]" not in req4.prompt, req4.prompt)
 
     print("[7] 指令：/记忆 查")
     out = await drain(plugin.memory_cmd(
-        FakeEvent("123456789", "小明", "/记忆 查 123456789", "1000000003", "三号群")))
+        FakeEvent("123456789", "小明", "/记忆 查 123456789", "100000001", "三号群")))
     txt = out[0][1] if out else ""
     check("查得到档案", "记忆档案" in txt, txt[:200])
-    check("档案含跨群", "一号群" in txt or "1000000001" in txt, txt[:400])
+    check("档案含跨群", "一号群" in txt or "693514204" in txt, txt[:400])
     check("档案含发言数", "累计发言：3" in txt, txt[:300])
 
     print("[8] 指令：/记忆 查 昵称")
     out = await drain(plugin.memory_cmd(
-        FakeEvent("123456789", "小明", "/记忆 查 大明", "1000000003", "三号群")))
+        FakeEvent("123456789", "小明", "/记忆 查 大明", "100000001", "三号群")))
     txt = out[0][1] if out else ""
     check("按昵称能反查到 QQ", "123456789" in txt, txt[:200])
 
     print("[8b] 指令：不带斜杠 + @昵称(QQ号) 形式")
     out = await drain(plugin.memory_cmd(
-        FakeEvent("123456789", "小明", "记忆 查 @大明(123456789)", "1000000003", "三号群")))
+        FakeEvent("123456789", "小明", "记忆 查 @大明(123456789)", "100000001", "三号群")))
     txt = out[0][1] if out else ""
     check("无斜杠也能解析", "记忆档案" in txt, txt[:200])
 
     print("[9] 指令：/记忆 搜")
     out = await drain(plugin.memory_cmd(
-        FakeEvent("123456789", "小明", "/记忆 搜 钓鱼", "1000000003", "三号群")))
+        FakeEvent("123456789", "小明", "/记忆 搜 钓鱼", "100000001", "三号群")))
     txt = out[0][1] if out else ""
     check("搜得到", "钓鱼" in txt and "123456789" in txt, txt[:300])
     out = await drain(plugin.memory_cmd(
-        FakeEvent("123456789", "小明", "/记忆 搜 量子力学", "1000000003", "三号群")))
+        FakeEvent("123456789", "小明", "/记忆 搜 量子力学", "100000001", "三号群")))
     txt = out[0][1] if out else ""
     check("搜不到时给明确提示", "没搜到" in txt, txt[:200])
 
     print("[10] 指令：/记忆 记住 + 忘记")
     out = await drain(plugin.memory_cmd(
-        FakeEvent("123456789", "小明", "/记忆 记住 123456789 喜欢喝冰美式", "1000000003", "三号群")))
+        FakeEvent("123456789", "小明", "/记忆 记住 123456789 喜欢喝冰美式", "100000001", "三号群")))
     txt = out[0][1] if out else ""
     check("事实已记录", "已记下" in txt, txt[:200])
     check("事实入库", any("冰美式" in f["content"] for f in plugin.store.get_facts("123456789")),
           plugin.store.get_facts("123456789"))
 
     out = await drain(plugin.memory_cmd(
-        FakeEvent("123456789", "小明", "/记忆 忘记 123456789", "1000000003", "三号群", admin=False)))
+        FakeEvent("123456789", "小明", "/记忆 忘记 123456789", "100000001", "三号群", admin=False)))
     txt = out[0][1] if out else ""
     check("非管理员不能删", "管理员" in txt, txt[:200])
 
     out = await drain(plugin.memory_cmd(
-        FakeEvent("1000000001", "管理员", "/记忆 忘记 987654321", "1000000003", "三号群", admin=True)))
+        FakeEvent("10000001", "管理员", "/记忆 忘记 987654321", "100000001", "三号群", admin=True)))
     txt = out[0][1] if out else ""
     check("管理员可删", "已删除" in txt, txt[:200])
     check("删除后查不到", plugin.store.get_user("987654321") is None)
 
     print("[11] 指令：/记忆 统计 与 帮助")
     out = await drain(plugin.memory_cmd(
-        FakeEvent("123456789", "小明", "/记忆 统计", "1000000003", "三号群")))
+        FakeEvent("123456789", "小明", "/记忆 统计", "100000001", "三号群")))
     txt = out[0][1] if out else ""
     check("统计可用", "记忆库统计" in txt and "人数" in txt, txt[:200])
     out = await drain(plugin.memory_cmd(
-        FakeEvent("123456789", "小明", "/记忆", "1000000003", "三号群")))
+        FakeEvent("123456789", "小明", "/记忆", "100000001", "三号群")))
     txt = out[0][1] if out else ""
     check("帮助可用", "用法" in txt and "/记忆 查" in txt, txt[:200])
 
     print("[12] 群白名单")
-    cfg["enabled_groups"] = ["1000000001"]
-    check("白名单内 = 生效", plugin._enabled(FakeEvent("10000", "a", "x", "1000000001", "g")))
+    cfg["enabled_groups"] = ["693514204"]
+    check("白名单内 = 生效", plugin._enabled(FakeEvent("10000", "a", "x", "693514204", "g")))
     check("白名单外 = 不生效", not plugin._enabled(FakeEvent("10000", "a", "x", "999999", "g")))
 
     plugin.store.close()

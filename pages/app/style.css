@@ -338,3 +338,91 @@ input[type="search"]:focus, select:focus {
   .layout { grid-template-columns: 1fr; }
   .user-list { max-height: 300px; }
 }
+
+/* ============ 情绪面板（2026-11-04 从 group_chat_plus 合并） ============ */
+.emotion-section {
+  border-top: 1px solid var(--line);
+  padding-top: 16px;
+  margin-top: 22px;
+}
+.emotion-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.emotion-head h3 { margin: 0; }
+.scene-tabs { display: inline-flex; gap: 6px; }
+.scene-tab {
+  padding: 5px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all .15s;
+}
+.scene-tab:hover { background: var(--panel-2); }
+.scene-tab.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+  font-weight: 600;
+}
+.emotion-card {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+}
+.emo-top {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.emo-label {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--text);
+}
+.emo-tier {
+  font-size: 12px;
+  color: var(--muted);
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+}
+.emo-bar {
+  display: grid;
+  grid-template-columns: 56px 1fr 34px;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 9px;
+}
+.emo-bar-label { font-size: 12px; color: var(--muted); }
+.emo-bar-track {
+  height: 8px;
+  background: var(--panel);
+  border-radius: 999px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+}
+.emo-bar-fill { display: block; height: 100%; border-radius: 999px; transition: width .3s; }
+.emo-aff  { background: linear-gradient(90deg,#60a5fa,#3b82f6); }
+.emo-warm { background: linear-gradient(90deg,#fbbf24,#f97316); }
+.emo-irr  { background: linear-gradient(90deg,#f87171,#dc2626); }
+.emo-bar-num { font-size: 12px; color: var(--text); text-align: right; font-variant-numeric: tabular-nums; }
+.emo-foot { margin-top: 10px; font-size: 12px; color: var(--muted); }
+.emotion-chart-wrap { margin-top: 14px; }
+.chart-title { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+#emotionChart {
+  width: 100%;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  display: block;
+}

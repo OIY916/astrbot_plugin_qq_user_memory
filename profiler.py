@@ -81,7 +81,8 @@ def load_llm_config(cmd_config_path: str | None = None) -> dict[str, Any]:
     """
     path = cmd_config_path or os.environ.get("UM_CMD_CONFIG") or DEFAULT_CMD_CONFIG
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        # AstrBot 自己写配置时用 utf-8-sig（带 BOM），这里必须兼容，否则报 BOM 错误
+        with open(path, "r", encoding="utf-8-sig") as f:
             cfg = json.load(f)
     except FileNotFoundError:
         raise RuntimeError(f"找不到 AstrBot 配置：{path}")

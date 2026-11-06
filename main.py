@@ -46,10 +46,8 @@ except Exception:  # pragma: no cover
 
 try:
     from .memory_store import (
-        AFFINITY_DEFAULT,
         ContextBuilder,
         MemoryStore,
-        affinity_tier,
         fmt_time,
         group_label,
         search_text,
@@ -60,10 +58,8 @@ except ImportError:  # 直接当脚本/单文件测试时走绝对导入
 
     _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
     from memory_store import (  # type: ignore
-        AFFINITY_DEFAULT,
         ContextBuilder,
         MemoryStore,
-        affinity_tier,
         fmt_time,
         group_label,
         search_text,
@@ -88,6 +84,41 @@ except ImportError:  # 单文件测试环境
         from webui_api import WebApiMixin  # type: ignore
     except Exception:  # WebUI 模块缺失不能影响 QQ 功能
         WebApiMixin = None  # type: ignore
+
+try:  # 情绪系统（好感度 + 情绪值，2026-11-04 从 group_chat_plus 搬过来）
+    from .emotion_hub import EmotionHub, scene_of, SCENE_GROUP, SCENE_PRIVATE
+except ImportError:  # 单文件测试环境
+    try:
+        _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+    except Exception:
+        pass
+    try:
+        from emotion_hub import (  # type: ignore
+            EmotionHub, scene_of, SCENE_GROUP, SCENE_PRIVATE,
+        )
+    except Exception:  # 情绪系统缺失不能影响记忆功能
+        EmotionHub = None  # type: ignore
+        scene_of = None  # type: ignore
+        SCENE_GROUP = "group"
+        SCENE_PRIVATE = "private"
+
+try:  # 好感度展示层
+    from .affinity_view import (
+        affinity_detail_text, affinity_rank_text, affinity_tier,
+    )
+except ImportError:
+    try:
+        _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+    except Exception:
+        pass
+    try:
+        from affinity_view import (  # type: ignore
+            affinity_detail_text, affinity_rank_text, affinity_tier,
+        )
+    except Exception:
+        affinity_detail_text = None  # type: ignore
+        affinity_rank_text = None  # type: ignore
+        affinity_tier = None  # type: ignore
 
 PLUGIN_NAME = "astrbot_plugin_qq_user_memory"
 
@@ -214,6 +245,52 @@ class QQUserMemoryPlugin(Star, *_MIXINS):
                 self._register_webui_apis()
         except Exception as e:
             logger.error(f"[user_memory] WebUI API 注册失败: {e}", exc_info=True)
+
+        # 情绪系统（好感度 + 情绪值）：独立 try，挂了不影响记忆
+        self.emotion = None
+        try:
+            self._init_emotion()
+        except Exception as e:
+            logger.error(f"[user_memory] 情绪系统初始化失败: {e}", exc_info=True)
+
+    # ------------------------------------------------------------ 情绪系统
+    def _init_emotion(self) -> None:
+        """初始化情绪系统（好感度 + 情绪值）。
+
+        ⚠️ 数据库放在本插件自己的数据目录，不再依赖 group_chat_plus。
+        """
+        if EmotionHub is None:
+            logger.warning("[user_memory] 情绪模块不可用（emotion_hub 缺失）")
+            return
+        if not self._cfg("enable_emotion", True):
+            logger.info("[user_memory] 情绪系统已关闭（enable_emotion=false）")
+            return
+
+        db_name = str(
+            self._cfg("emotion_db_file", "mood_dual.db") or "mood_dual.db"
+        )
+        db_path = os.path.join(self._data_dir(), db_name)
+        self.emotion = EmotionHub(
+            db_path,
+            context=self.context,
+            enable_llm=bool(self._cfg("enable_mood_llm_analysis", True)),
+            max_llm_per_hour=int(self._cfg("mood_llm_max_per_hour", 60)),
+        )
+        if not self.emotion.ready:
+            logger.warning(
+                f"[user_memory] 情绪系统未就绪: {self.emotion.init_error}"
+            )
+            return
+        rows = len(self.emotion.affinity_rows(1000))
+        logger.info(
+            f"  ✅ 情绪系统已启用（好感度+情绪值，DB={db_path}，{rows} 人）"
+        )
+
+    def _emotion_ready(self) -> bool:
+        return bool(
+            getattr(self, "emotion", None) is not None
+            and getattr(self.emotion, "ready", False)
+        )
 
     # ------------------------------------------------------------ 基础
     def _cfg(self, key: str, default: Any = None) -> Any:
@@ -477,8 +554,15 @@ class QQUserMemoryPlugin(Star, *_MIXINS):
             return
         if not self._cfg("inject_memory", True):
             return
-        if not self._cfg("inject_on_all", False):
-            # 默认只在被 @ / 唤醒时注入，避免每条读空气消息都吃 token
+        # ⚠️ 2026-11-05 修：原来这里用 event.is_at_or_wake_command 当门槛，
+        # 但 group_chat_plus 在剥离「@机器人」之后会把该标记置成 False
+        # （main.py:9581），于是**走 gcp 主回复链路的消息全部拿不到记忆**
+        # —— 实测 259 次 AI 调用里只有 72 次注入了记忆（28%）。
+        # on_llm_request 本来就只在「真的要调 LLM」时触发，
+        # 所以「是否注入」不该由「有没有 @」决定，而由「这个人有没有可注入的记忆」决定。
+        # inject_on_all 现在只用来控制「纯读空气回复要不要也带上记忆」，
+        # 默认改成 True：不带上记忆的回复才是真正的浪费。
+        if not self._cfg("inject_on_all", True):
             if not getattr(event, "is_at_or_wake_command", False):
                 return
 
@@ -513,6 +597,20 @@ class QQUserMemoryPlugin(Star, *_MIXINS):
             return
 
         if not block:
+            pass
+        else:
+            # ---- 情绪提示（好感度 + 情绪值）----
+            # 追加到最后一条 user 消息上，不碰 system_prompt（缓存友好）
+            try:
+                if self._emotion_ready():
+                    _scene = scene_of(event) if scene_of else SCENE_GROUP
+                    _hint = self.emotion.get_hint(qq, _scene)
+                    if _hint:
+                        block = block + "\n\n" + _hint
+            except Exception as e:  # noqa: BLE001
+                logger.debug(f"[user_memory] 情绪提示拼接失败（忽略）: {e}")
+
+        if not block:
             return
 
         try:
@@ -523,6 +621,33 @@ class QQUserMemoryPlugin(Star, *_MIXINS):
             )
         except Exception as e:
             logger.error(f"[user_memory] 注入 prompt 失败: {e}")
+
+    # ------------------------------------------------------------ 2b. 情绪分析
+    @filter.on_llm_request(priority=51)
+    async def analyze_emotion(self, event: AstrMessageEvent, req):
+        """后台异步分析这一轮的情绪（第 N 轮的结果第 N+1 轮用）。
+
+        ⚠️ 用 asyncio.create_task 起后台任务，**绝不 await**
+        —— 否则会拖慢主对话首字延迟。
+        """
+        if not self._emotion_ready():
+            return
+        try:
+            qq = str(event.get_sender_id() or "")
+            if not qq:
+                return
+            text = self._text(event)
+            if not text:
+                return
+            scene = scene_of(event) if scene_of else SCENE_GROUP
+            umo = ""
+            try:
+                umo = str(getattr(event, "unified_msg_origin", "") or "")
+            except Exception:  # noqa: BLE001
+                pass
+            self.emotion.spawn_analysis(qq, text, scene=scene, umo=umo)
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"[user_memory] 情绪分析启动失败（忽略）: {e}")
 
     # ------------------------------------------------------------ 3. 指令
     def _resolve_qq(self, token: str) -> str | None:
@@ -620,46 +745,15 @@ class QQUserMemoryPlugin(Star, *_MIXINS):
             return
 
         if sub in ("好感", "好感度", "affinity"):
-            # 好感度可见性由配置项 affinity_viewer_qq 控制
-            viewer = str(self._cfg("affinity_viewer_qq", "") or "").strip()
-            # 留空 = 所有人可查；填了 QQ 号 = 只有该号可查
-            if viewer and self._sender_id(event) != viewer:
-                yield event.plain_result("这个指令不对你开放。")
-                return
-            # 支持设置：/记忆 好感 123456789 20   ← 锁定为 20，不被自动评估覆盖
-            parts = rest.split()
-            if len(parts) >= 2:
-                target = _extract_qq(parts[0]) or parts[0]
-                try:
-                    val = float(parts[1])
-                except ValueError:
-                    yield event.plain_result("用法：/记忆 好感 <QQ号> [0-100]")
-                    return
-                sc = self.store.set_affinity(target, val, "主人手动设定", locked=True)
-                yield event.plain_result(
-                    f"已把 QQ {target} 的好感度锁定为 {sc:.0f}（自动评估不再改动）"
-                )
-                return
-            target = _extract_qq(rest) if rest else ""
-            if target:
-                yield event.plain_result(self._affinity_detail_text(target))
-            else:
-                yield event.plain_result(self._affinity_rank_text())
+            yield event.plain_result(
+                "好感度已迁到情绪系统：用 /好感 <QQ号> 查看，"
+                "/好感 排行 看排行榜，/好感 设 <QQ> <分数> 手动设定。"
+            )
             return
 
         if sub in ("解锁好感", "unlock"):
-            viewer = str(self._cfg("affinity_viewer_qq", "") or "").strip()
-            # 留空 = 所有人可查；填了 QQ 号 = 只有该号可查
-            if viewer and self._sender_id(event) != viewer:
-                yield event.plain_result("这个指令不对你开放。")
-                return
-            target = _extract_qq(rest) if rest else ""
-            if not target:
-                yield event.plain_result("用法：/记忆 解锁好感 <QQ号>")
-                return
-            ok = self.store.unlock_affinity(target)
             yield event.plain_result(
-                f"已解除 QQ {target} 的好感锁定" if ok else f"QQ {target} 没有锁定记录"
+                "锁定功能已废弃（好感度现在跟着情绪系统走）。"
             )
             return
 
@@ -727,9 +821,8 @@ class QQUserMemoryPlugin(Star, *_MIXINS):
                     )
                     profiler_mod.replace_profile_fact(self.store, target, text)
                     note = ""
-                    if delta is not None and abs(delta) >= 0.5:
-                        sc = self.store.adjust_affinity(target, delta, f"手动更新画像 {delta:+.0f}")
-                        note = f"\n好感度 {delta:+.0f} → {sc:.0f}"
+                    # 好感度已迁到 group_chat_plus 的情绪系统，
+                    # 画像只更新文本，不再动好感度数值
                     yield event.plain_result(f"【QQ {target} 画像已更新】\n{text}{note}")
                     return
                 res = await self.run_profile_now()
@@ -793,61 +886,140 @@ class QQUserMemoryPlugin(Star, *_MIXINS):
         except Exception:
             return False
 
-    # ------------------------------------------------------------ 好感度展示
-    def _affinity_detail_text(self, qq: str) -> str:
-        """单人好感度详情。"""
-        qq = str(qq or "").strip()
-        if not qq:
-            return "用法：/记忆 好感 <QQ号>"
-        try:
-            aff = self.store.get_affinity(qq)
-        except Exception as e:
-            return f"读取好感度失败：{e}"
-        user = self.store.get_user(qq) or {}
-        tier, desc = affinity_tier(aff["score"])
-        nicks = []
-        try:
-            nicks = [n for n, _c in self.store.get_nicknames(qq, 3) if n]
-        except Exception:
-            pass
-        out = [
-            f"【好感度】QQ {qq}",
-            f"昵称：{(user.get('nickname') or (nicks[0] if nicks else '未知'))}",
-            f"好感度：{aff['score']:.0f}/100（{tier}）",
-            f"行为倾向：{desc}",
-        ]
-        if aff.get("reason"):
-            out.append(f"最近调整：{aff['reason']}")
-        if aff.get("updated_at"):
-            out.append(f"更新时间：{fmt_time(aff['updated_at'])}")
-        return "\n".join(out)
+    # ------------------------------------------------------------ 好感度
+    # 2026-11-04：好感度已从 group_chat_plus 搬进本插件的情绪系统，
+    # 数据源是本插件的 mood_dual.db（mood_state_v2.affection）。
+    def _affinity_detail_text(self, qq: str, scene: str = SCENE_GROUP) -> str:
+        """单人好感度详情（含双驱信息）。"""
+        if not self._emotion_ready() or affinity_detail_text is None:
+            return "情绪系统未启用，好感度不可用。"
+        st = self.emotion.get_state(qq, scene)
+        if st is None:
+            return f"读取失败：查不到 QQ {qq} 的情绪记录。"
+        return affinity_detail_text(
+            str(qq), st.affection,
+            warmth=st.warmth, irritation=st.irritation,
+            label=st.label(), turns=st.turns,
+        )
 
-    def _affinity_rank_text(self) -> str:
-        """好感度排行总览。"""
+    def _affinity_rank_text(self, n: int = 10, scene: str | None = None) -> str:
+        """好感度排行榜。"""
+        if not self._emotion_ready() or affinity_rank_text is None:
+            return "情绪系统未启用，好感度不可用。"
+        rows = self.emotion.affinity_rows(n, scene)
+        for r in rows:
+            r["nickname"] = self._nick_label(r["qq"])
+        return affinity_rank_text(rows, n)
+
+    def _nick_label(self, qq: str) -> str:
+        """从 users 表拿昵称（本插件自己的库，不用外部依赖）。"""
         try:
-            rows = self.store.affinity_top(limit=15)
-        except Exception as e:
-            return f"读取好感度失败：{e}"
-        if not rows:
-            return (
-                "还没有好感度记录。\n"
-                "好感度由每天凌晨的画像任务自动评估，也可以 /记忆 更新画像 立刻触发。"
+            u = self.store.get_user(str(qq)) if self.store else None
+            if u:
+                return str(u.get("nickname") or "")
+        except Exception:  # noqa: BLE001
+            pass
+        return ""
+
+    def _resolve_qq_arg(self, token: str) -> str:
+        """把 QQ 号或昵称解析成 QQ 号。"""
+        t = (token or "").strip()
+        if not t:
+            return ""
+        # 先按昵称查（本插件见过的）
+        try:
+            if self.store is not None:
+                hits = self.store.find_qq_by_nickname(t)
+                if len(hits) == 1:
+                    return hits[0]
+                if not hits:
+                    hits = self.store.find_qq_by_nickname_prefix(t)
+                    if len(hits) == 1:
+                        return hits[0]
+        except Exception:  # noqa: BLE001
+            pass
+        digits = "".join(ch for ch in t if ch.isdigit())
+        if digits and len(digits) >= 5:
+            return digits
+        return ""
+
+    @filter.command("好感")
+    async def affinity_cmd(self, event: AstrMessageEvent):
+        """好感度：查看 / 排行 / 设定。
+
+        用法：
+          /好感 <QQ号或昵称>      查这个人
+          /好感 排行 [N]          排行榜
+          /好感 设 <QQ> <分数>    手动设定
+          /好感 私聊 <QQ>         看私聊场景的好感度
+        """
+        if not self._emotion_ready():
+            yield event.plain_result("情绪系统未启用，好感度不可用。")
+            return
+
+        args = ""
+        try:
+            raw = str(event.get_message_str() or "").strip()
+            for pref in ("/好感", "好感"):
+                if raw.startswith(pref):
+                    args = raw[len(pref):].strip()
+                    break
+            else:
+                args = raw
+        except Exception:  # noqa: BLE001
+            args = ""
+
+        # ---- 排行 ----
+        if args.startswith(("排行", "排名", "榜")):
+            rest = args[2:].strip() if args.startswith("排行") else args[1:].strip()
+            n = 10
+            try:
+                n = int(rest) if rest else 10
+            except ValueError:
+                n = 10
+            n = max(1, min(n, 30))
+            yield event.plain_result(self._affinity_rank_text(n))
+            return
+
+        # ---- 设定 ----
+        if args.startswith(("设", "设置", "set")):
+            rest = args[1:].strip() if args.startswith("设") else args[2:].strip()
+            parts = rest.split()
+            if len(parts) < 2:
+                yield event.plain_result("用法：/好感 设 <QQ号> <0-100>")
+                return
+            target = self._resolve_qq_arg(parts[0]) or parts[0]
+            try:
+                val = float(parts[1])
+            except ValueError:
+                yield event.plain_result("分数必须是数字（0~100）。")
+                return
+            if not self.emotion.set_affection(target, val):
+                yield event.plain_result("设定失败：情绪库不可写。")
+                return
+            tier = self.emotion.tier_of(val)
+            yield event.plain_result(
+                f"已把 QQ {target} 的好感度设为 {max(0, min(100, val)):.0f}（{tier}）"
             )
-        out = ["【好感度排行（前15）】"]
-        for i, r in enumerate(rows, 1):
-            nick = r.get("nickname") or "?"
-            tier, _ = affinity_tier(r["score"])
-            out.append(f"{i}. {nick}({r['qq']}) {r['score']:.0f} [{tier}]")
-        # 顺便给出全局统计
-        try:
-            st = self.store.stats()
-            out.append("")
-            out.append(f"共 {st['users']} 人，初始好感 {AFFINITY_DEFAULT:.0f}")
-        except Exception:
-            pass
-        return "\n".join(out)
+            return
 
-    # ------------------------------------------------------------ 生命周期
+        # ---- 私聊场景 ----
+        if args.startswith("私聊"):
+            rest = args[3:].strip()
+            target = self._resolve_qq_arg(rest) or rest or self._sender_id(event)
+            yield event.plain_result(
+                self._affinity_detail_text(target, SCENE_PRIVATE))
+            return
+
+        # ---- 查单人 ----
+        if args:
+            target = self._resolve_qq_arg(args) or args
+            yield event.plain_result(self._affinity_detail_text(target))
+            return
+
+        yield event.plain_result(self._affinity_rank_text(10))
+
+
     async def terminate(self):
         # 先取消定时任务，避免关库之后协程还在写
         task = self._profile_task
